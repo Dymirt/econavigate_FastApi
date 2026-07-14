@@ -1,0 +1,144 @@
+# Eco Navigate FastAPI
+
+Eco Navigate finds walking and cycling alternatives through Warsaw and recommends the
+route with stronger exposure to trees, shrubs, and forests without accepting an
+unreasonable detour. This repository contains the production backend for the
+[Eco Navigate frontend](https://github.com/Dymirt/Warsaw_moss).
+
+The service keeps the Warsaw API token on the server. It replaces the frontend
+repository's Node/Vercel backend and preserves its existing API contract.
+
+## What it does
+
+- Geocodes Warsaw addresses with Nominatim.
+- Requests pedestrian or bicycle alternatives from Valhalla.
+- Loads current tree, shrub, and forest inventories from Warsaw Open Data.
+- Samples every route and scores nearby greenery.
+- Selects the best green route after applying a detour penalty.
+- Optionally returns live Warsaw air-quality stations.
+
+No routing or map key is required by the current implementation. Valhalla and
+Nominatim are public community services, and the frontend uses OpenStreetMap tiles.
+For a high-traffic production service, self-host these dependencies or use a provider
+with an SLA and follow its usage policy.
+
+## Performance and caching
+
+The API is asynchronous and reuses a pooled HTTP client. CPU-heavy route scoring runs
+outside the async event loop. A spatial grid limits distance calculations to nearby
+route segments instead of comparing every tree with every segment.
+
+Responses are cached in a persistent DiskCache database:
+
+| Data | Default TTL | Reason |
+| --- | ---: | --- |
+| Tree, shrub, and forest inventories | 7 days | These records change slowly and are expensive to download. |
+| Geocoding and district lookups | 30 days | Addresses rarely change. |
+| Complete route results | 10 minutes | Makes repeated searches immediate while allowing routing updates. |
+| Air quality | 5 minutes | Keeps sensor readings reasonably fresh. |
+
+The cache survives process restarts when `CACHE_DIR` is backed by a persistent Docker
+volume. Concurrent requests for the same uncached item are coalesced per worker.
+Deploy one container with two workers first; increase replicas only when the upstream
+services and host capacity can support the extra cold-cache requests.
+
+## API
+
+Interactive OpenAPI documentation is available at `/docs`.
+
+### `POST /api/route`
+
+```json
+{
+  "from": "Pałac Kultury i Nauki",
+  "to": "Łazienki Królewskie",
+  "mode": "walking"
+}
+```
+
+`mode` accepts `walking` or `cycling`. The response contains geocoded endpoints,
+route alternatives, the selected route ID, green scores, greenery points and counts,
+warnings for partially unavailable inventories, and a calculation timestamp.
+
+### `GET /api/air`
+
+Returns `{ "stations": [...], "fetchedAt": "..." }`. This endpoint requires
+`WARSAW_API_TOKEN` on the server.
+
+### `GET /api/health`
+
+Returns service readiness, whether the Warsaw token is configured, and non-sensitive
+cache statistics.
+
+## Local development
+
+Requires Python 3.12 or newer.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e '.[dev]'
+cp .env.example .env.local
+uvicorn econavigate.main:app --reload
+```
+
+Put the real token in `.env.local`; local environment files are ignored by Git. Then open
+<http://127.0.0.1:8000/docs>.
+
+Run checks with:
+
+```bash
+ruff check .
+ruff format --check .
+pytest
+```
+
+## Deploy on your server
+
+1. Clone this repository and copy `.env.example` to `.env.local`.
+2. Set `WARSAW_API_TOKEN` and the exact frontend origins in `CORS_ORIGINS`.
+3. Start the container:
+
+   ```bash
+   docker compose up -d --build
+   docker compose ps
+   docker compose logs -f api
+   ```
+
+4. Put Caddy, Nginx, or another TLS reverse proxy in front of
+   `http://127.0.0.1:8000`. Only the HTTPS proxy should be publicly exposed.
+5. Verify `https://your-api-domain.example/api/health` and `/docs`.
+
+The Compose file binds port 8000 to localhost, runs two Uvicorn workers, restarts the
+service after failures, and stores cached data in the `eco-cache` volume.
+
+## Connect the Vercel frontend
+
+The browser must use HTTPS for the API when the frontend is served over HTTPS. There
+are two clean options after this service has an API domain:
+
+- Configure the frontend to use `https://your-api-domain.example` as its API base URL
+  and include the Vercel domain in `CORS_ORIGINS`.
+- Add a Vercel rewrite from `/api/:path*` to
+  `https://your-api-domain.example/api/:path*`. The frontend can then keep its current
+  same-origin requests and no Vercel Function is needed.
+
+Do not add `WARSAW_API_TOKEN` to Vercel or any `VITE_` variable. It belongs only in
+this backend's `.env.local` file.
+
+## Configuration
+
+All settings use environment variables. The most useful ones are listed in
+[`.env.example`](.env.example). Cache TTL values are seconds. Upstream URLs, timeouts,
+connection pool sizes, cache size, and the Nominatim interval are also configurable;
+see `econavigate/config.py` for the complete list.
+
+## Data and routing sources
+
+- [Warsaw Open Data API](https://api.um.warszawa.pl/) — tree, shrub, forest, and air-quality data.
+- [OpenStreetMap Nominatim](https://nominatim.org/) — address and district lookup.
+- [Valhalla](https://valhalla.github.io/valhalla/) — walking and cycling route alternatives.
+- [OpenStreetMap](https://www.openstreetmap.org/copyright) — map and routing source data.
+
+The green score is a route-ranking heuristic, not an official environmental or
+accessibility rating. Always respect closures and on-site signage.
