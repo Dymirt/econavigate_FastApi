@@ -105,12 +105,20 @@ pytest
    docker compose logs -f api
    ```
 
-4. Put Caddy, Nginx, or another TLS reverse proxy in front of
-   `http://127.0.0.1:8000`. Only the HTTPS proxy should be publicly exposed.
+4. Put Cloudflare Tunnel, Caddy, Nginx, or another TLS reverse proxy in front of
+   port 8000. The Compose service listens on all host interfaces so a connector on
+   another LAN machine can reach it. Restrict TCP 8000 to the connector's source IP
+   with the host or network firewall; do not expose it directly to the internet.
 5. Verify `https://your-api-domain.example/api/health` and `/docs`.
 
-The Compose file binds port 8000 to localhost, runs two Uvicorn workers, restarts the
-service after failures, and stores cached data in the `eco-cache` volume.
+The Compose file publishes port 8000 on the server's network interfaces, runs two
+Uvicorn workers, restarts the service after failures, and stores cached data in the
+`eco-cache` volume.
+
+For example, a Cloudflare Tunnel connector on the same LAN can use
+`http://SERVER_LAN_IP:8000` as its origin. If the connector runs on the API server
+itself, change the port mapping in `compose.yaml` back to
+`127.0.0.1:8000:8000` to keep the origin loopback-only.
 
 ## Connect the Vercel frontend
 

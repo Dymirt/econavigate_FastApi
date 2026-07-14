@@ -4,7 +4,9 @@ services:
     restart: unless-stopped
     env_file: .env.local
     ports:
-      - "127.0.0.1:8000:8000"
+      # Reachable by a reverse proxy or Cloudflare Tunnel connector on the LAN.
+      # Restrict TCP 8000 to that connector with the host/network firewall.
+      - "0.0.0.0:8000:8000"
     volumes:
       - eco-cache:/data/cache
     deploy:
