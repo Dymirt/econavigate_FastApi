@@ -15,8 +15,8 @@ def test_route_with_more_nearby_trees_is_selected():
         },
         {
             "id": "route-2",
-            "distance": 1_020.0,
-            "duration": 820.0,
+            "distance": 1_250.0,
+            "duration": 1_000.0,
             "summary": "Green route",
             "geometry": {
                 "type": "LineString",
@@ -48,6 +48,7 @@ def test_route_with_more_nearby_trees_is_selected():
     )
 
     assert response["selectedRouteId"] == "route-2"
+    assert response["routes"][1]["detourPercent"] == 25
     assert response["ecoCounts"]["tree"] == 19
     assert len(response["routes"]) == 2
     assert "_rankScore" not in response["routes"][0]

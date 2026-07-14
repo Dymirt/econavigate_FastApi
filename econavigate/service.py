@@ -16,8 +16,11 @@ from .errors import ApiError
 from .models import CurrentLocation, RouteRequest
 from .scoring import build_route_response
 from .upstream import UpstreamClient
+from .waypoints import select_green_waypoints
 
 T = TypeVar("T")
+MAX_TREE_ROUTE_DETOUR_RATIO = 1.35
+MAX_TREE_ROUTE_EXTRA_METERS = 5_000.0
 
 WARSAW_VIEWBOX = "20.8517,52.3681,21.2712,52.0978"
 WARSAW_DATA_BOUNDS = {
@@ -92,7 +95,7 @@ def resolve_district(address: dict[str, Any], display_name: str) -> str | None:
     return None
 
 
-def route_district_probes(routes: list[dict[str, Any]], count: int = 4) -> list[list[float]]:
+def route_district_probes(routes: list[dict[str, Any]], count: int = 8) -> list[list[float]]:
     """Pick evenly spaced points from the part of the fastest route inside Warsaw."""
 
     fastest_route = min(routes, key=lambda route: route["distance"])
@@ -224,7 +227,7 @@ class EcoService:
         )
         digest = hashlib.sha256(fingerprint.encode()).hexdigest()
         return await self.cache.get_or_load(
-            f"v3:route:{digest}",
+            f"v4:route:{digest}",
             self.settings.route_cache_ttl_seconds,
             lambda: self._build_green_route(request),
         )
@@ -234,14 +237,14 @@ class EcoService:
             self._resolve_origin(request.from_query),
             self._geocode(request.to_query),
         )
-        routes = await self._fetch_routes(from_place, to_place, request.mode)
+        baseline_routes = await self._fetch_routes(from_place, to_place, request.mode)
 
         route_districts: list[str] = []
         if from_place["district"] != to_place["district"]:
             lookups = await asyncio.gather(
                 *(
                     self._reverse_geocode(coordinate)
-                    for coordinate in route_district_probes(routes)
+                    for coordinate in route_district_probes(baseline_routes)
                 ),
                 return_exceptions=True,
             )
@@ -263,7 +266,40 @@ class EcoService:
             )
         )
         greenery, warnings = await self._fetch_greenery(districts)
-        return await asyncio.to_thread(
+        fastest_route = min(baseline_routes, key=lambda route: route["distance"])
+        green_waypoints = await asyncio.to_thread(
+            select_green_waypoints,
+            fastest_route,
+            greenery,
+        )
+        routes = baseline_routes
+        routing_strategy = "ranked-alternatives"
+        if green_waypoints:
+            try:
+                generated_route = (
+                    await self._fetch_routes(
+                        from_place,
+                        to_place,
+                        request.mode,
+                        waypoints=green_waypoints,
+                        alternates=0,
+                        route_kind="tree-guided",
+                    )
+                )[0]
+            except ApiError:
+                green_waypoints = []
+            else:
+                maximum_tree_route_distance = min(
+                    fastest_route["distance"] * MAX_TREE_ROUTE_DETOUR_RATIO,
+                    fastest_route["distance"] + MAX_TREE_ROUTE_EXTRA_METERS,
+                )
+                if generated_route["distance"] <= maximum_tree_route_distance:
+                    routes = [generated_route, *baseline_routes[:2]]
+                    routing_strategy = "tree-waypoints"
+                else:
+                    green_waypoints = []
+
+        response = await asyncio.to_thread(
             build_route_response,
             routes=routes,
             greenery=greenery,
@@ -273,6 +309,11 @@ class EcoService:
             districts=districts,
             warnings=warnings,
         )
+        return {
+            **response,
+            "routingStrategy": routing_strategy,
+            "greenWaypoints": green_waypoints,
+        }
 
     async def _resolve_origin(self, origin: str | CurrentLocation) -> dict[str, Any]:
         if isinstance(origin, str):
@@ -347,20 +388,32 @@ class EcoService:
         from_place: dict[str, Any],
         to_place: dict[str, Any],
         mode: str,
+        *,
+        waypoints: list[dict[str, Any]] | None = None,
+        alternates: int = 2,
+        route_kind: str = "alternative",
     ) -> list[dict[str, Any]]:
         costing = "bicycle" if mode == "cycling" else "pedestrian"
+        locations = [{"lat": from_place["lat"], "lon": from_place["lon"]}]
+        locations.extend(
+            {
+                "lat": waypoint["lat"],
+                "lon": waypoint["lon"],
+                "type": "through",
+            }
+            for waypoint in (waypoints or [])
+        )
+        locations.append({"lat": to_place["lat"], "lon": to_place["lon"]})
         request: dict[str, Any] = {
-            "locations": [
-                {"lat": from_place["lat"], "lon": from_place["lon"]},
-                {"lat": to_place["lat"], "lon": to_place["lon"]},
-            ],
+            "locations": locations,
             "costing": costing,
-            "alternates": 2,
             "format": "osrm",
             "shape_format": "geojson",
             "language": "en-US",
             "directions_type": "none",
         }
+        if alternates > 0:
+            request["alternates"] = alternates
         if costing == "bicycle":
             request["costing_options"] = {"bicycle": {"bicycle_type": "city", "use_roads": 0.2}}
 
@@ -380,13 +433,24 @@ class EcoService:
 
         routes = []
         for index, route in enumerate(route_records):
+            route_id = (
+                "tree-guided"
+                if route_kind == "tree-guided" and index == 0
+                else f"route-{index + 1}"
+            )
             routes.append(
                 {
-                    "id": f"route-{index + 1}",
+                    "id": route_id,
                     "distance": float(route["distance"]),
                     "duration": float(route["duration"]),
-                    "summary": (route.get("legs") or [{}])[0].get("summary") or "Warsaw route",
+                    "summary": (
+                        "Tree-guided route"
+                        if route_kind == "tree-guided"
+                        else (route.get("legs") or [{}])[0].get("summary") or "Warsaw route"
+                    ),
                     "geometry": route["geometry"],
+                    "routeKind": route_kind,
+                    "greenWaypoints": waypoints or [],
                 }
             )
         return routes

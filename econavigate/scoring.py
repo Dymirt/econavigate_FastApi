@@ -154,7 +154,9 @@ def build_route_response(
             (route["distance"] - shortest_distance) / shortest_distance * 100
         )
         green_score = scored["greenScore"]
-        rank_score = -detour_percent if green_score is None else green_score - detour_percent * 1.25
+        rank_score = (
+            -detour_percent if green_score is None else green_score * 1_000 - detour_percent
+        )
         scored_routes.append(
             {
                 **scored,

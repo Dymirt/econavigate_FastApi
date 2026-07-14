@@ -1,3 +1,4 @@
+import json
 from unittest.mock import AsyncMock
 
 import pytest
@@ -79,3 +80,48 @@ def test_route_district_probes_cover_the_route_inside_warsaw():
         [21.10, 52.23],
         [21.18, 52.24],
     ]
+
+
+@pytest.mark.asyncio
+async def test_tree_waypoints_are_sent_as_ordered_through_locations(tmp_path):
+    service = make_service(tmp_path)
+    service.upstream.get_json.return_value = {
+        "code": "Ok",
+        "routes": [
+            {
+                "distance": 1_150,
+                "duration": 900,
+                "legs": [{"summary": "Generated"}],
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [[21.0, 52.2], [21.005, 52.201], [21.01, 52.2]],
+                },
+            }
+        ],
+    }
+    waypoints = [
+        {"lat": 52.201, "lon": 21.004, "type": "through", "treeCount": 12},
+        {"lat": 52.201, "lon": 21.007, "type": "through", "treeCount": 18},
+    ]
+
+    routes = await service._fetch_routes(
+        {"lat": 52.2, "lon": 21.0},
+        {"lat": 52.2, "lon": 21.01},
+        "walking",
+        waypoints=waypoints,
+        alternates=0,
+        route_kind="tree-guided",
+    )
+
+    request_json = json.loads(service.upstream.get_json.await_args.kwargs["params"]["json"])
+    assert "alternates" not in request_json
+    assert request_json["locations"] == [
+        {"lat": 52.2, "lon": 21.0},
+        {"lat": 52.201, "lon": 21.004, "type": "through"},
+        {"lat": 52.201, "lon": 21.007, "type": "through"},
+        {"lat": 52.2, "lon": 21.01},
+    ]
+    assert routes[0]["id"] == "tree-guided"
+    assert routes[0]["routeKind"] == "tree-guided"
+    assert routes[0]["greenWaypoints"] == waypoints
+    await service.cache.close()
