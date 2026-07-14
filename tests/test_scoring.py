@@ -55,3 +55,54 @@ def test_route_with_more_nearby_trees_is_selected():
     assert response["routes"][0]["greenery"] == []
     assert response["routes"][1]["ecoCounts"]["tree"] == 19
     assert len(response["routes"][1]["greenery"]) == 19
+
+
+def test_returns_every_tree_within_five_metres_and_excludes_farther_trees():
+    route = {
+        "id": "route-1",
+        "distance": 1_000.0,
+        "duration": 800.0,
+        "summary": "Test route",
+        "geometry": {
+            "type": "LineString",
+            "coordinates": [[21.0, 52.2], [21.01, 52.2]],
+        },
+    }
+    four_metres_in_degrees = 4 / 111_320
+    six_metres_in_degrees = 6 / 111_320
+    nearby_trees = [
+        {
+            "id": f"tree-near-{index}",
+            "type": "tree",
+            "lon": 21.0001 + index * (0.0098 / 599),
+            "lat": 52.2 + four_metres_in_degrees,
+            "district": "Śródmieście",
+            "name": "Tree",
+            "detail": "good",
+        }
+        for index in range(600)
+    ]
+    farther_tree = {
+        "id": "tree-too-far",
+        "type": "tree",
+        "lon": 21.005,
+        "lat": 52.2 + six_metres_in_degrees,
+        "district": "Śródmieście",
+        "name": "Tree",
+        "detail": "good",
+    }
+
+    response = build_route_response(
+        routes=[route],
+        greenery=[*nearby_trees, farther_tree],
+        from_place={"lat": 52.2, "lon": 21.0, "label": "A", "district": "Śródmieście"},
+        to_place={"lat": 52.2, "lon": 21.01, "label": "B", "district": "Śródmieście"},
+        mode="walking",
+        districts=["Śródmieście"],
+        warnings=[],
+    )
+
+    displayed_ids = {point["id"] for point in response["greenery"]}
+    assert len(displayed_ids) == 600
+    assert response["ecoCounts"]["tree"] == 600
+    assert "tree-too-far" not in displayed_ids

@@ -9,6 +9,9 @@ from typing import Any
 Point = dict[str, Any]
 Route = dict[str, Any]
 Coordinate = list[float]
+GREENERY_CORRIDOR_METERS = 5.0
+FULL_SCORE_DENSITY_PER_KM = {"tree": 20.0, "shrub": 8.0, "forest": 2.0}
+GREENERY_WEIGHTS = {"tree": 0.55, "shrub": 0.2, "forest": 0.25}
 
 
 def _js_round(value: float) -> int:
@@ -18,41 +21,6 @@ def _js_round(value: float) -> int:
 def to_meters(coordinate: Coordinate) -> tuple[float, float]:
     lon, lat = coordinate
     return lon * 67_800, lat * 111_320
-
-
-def distance_meters(first: Coordinate, second: Coordinate) -> float:
-    first_x, first_y = to_meters(first)
-    second_x, second_y = to_meters(second)
-    return math.hypot(first_x - second_x, first_y - second_y)
-
-
-def sample_route(coordinates: list[Coordinate], spacing: float = 55) -> list[Coordinate]:
-    if len(coordinates) < 2:
-        return coordinates
-
-    samples = [coordinates[0]]
-    distance_since_sample = 0.0
-
-    for index in range(1, len(coordinates)):
-        start = coordinates[index - 1]
-        end = coordinates[index]
-        segment_length = distance_meters(start, end)
-
-        while distance_since_sample + segment_length >= spacing:
-            required = spacing - distance_since_sample
-            ratio = required / segment_length if segment_length else 0
-            start = [
-                start[0] + (end[0] - start[0]) * ratio,
-                start[1] + (end[1] - start[1]) * ratio,
-            ]
-            samples.append(start)
-            segment_length = distance_meters(start, end)
-            distance_since_sample = 0
-
-        distance_since_sample += segment_length
-
-    samples.append(coordinates[-1])
-    return samples
 
 
 def route_bounds(routes: list[Route], padding: float = 0.003) -> dict[str, float]:
@@ -69,58 +37,21 @@ def route_bounds(routes: list[Route], padding: float = 0.003) -> dict[str, float
     }
 
 
-def _build_point_grid(
-    points: list[Point], cell_size: float = 80
-) -> tuple[dict[tuple[int, int], list[tuple[Point, float, float]]], float]:
-    grid: dict[tuple[int, int], list[tuple[Point, float, float]]] = defaultdict(list)
-    for point in points:
-        x, y = to_meters([point["lon"], point["lat"]])
-        key = (math.floor(x / cell_size), math.floor(y / cell_size))
-        grid[key].append((point, x, y))
-    return grid, cell_size
-
-
-def _nearby_counts(
-    coordinate: Coordinate,
-    grid: dict[tuple[int, int], list[tuple[Point, float, float]]],
-    cell_size: float,
-) -> dict[str, int]:
-    x, y = to_meters(coordinate)
-    center_x = math.floor(x / cell_size)
-    center_y = math.floor(y / cell_size)
-    counts = {"tree": 0, "shrub": 0, "forest": 0}
-
-    for offset_x in range(-2, 3):
-        for offset_y in range(-2, 3):
-            for point, point_x, point_y in grid.get((center_x + offset_x, center_y + offset_y), []):
-                radius = 125 if point["type"] == "forest" else 65
-                if math.hypot(point_x - x, point_y - y) <= radius:
-                    counts[point["type"]] += 1
-    return counts
-
-
-def _score_route(
-    route: Route,
-    grid: dict[tuple[int, int], list[tuple[Point, float, float]]],
-    cell_size: float,
-    has_greenery: bool,
-) -> Route:
+def _score_route(route: Route, counts: dict[str, int], has_greenery: bool) -> Route:
     if not has_greenery:
         return {**route, "greenScore": None, "sampleCount": 0}
 
-    samples = sample_route(route["geometry"]["coordinates"])
-    total = 0.0
-    for coordinate in samples:
-        counts = _nearby_counts(coordinate, grid, cell_size)
-        tree_score = min(counts["tree"], 8) / 8
-        shrub_score = min(counts["shrub"], 4) / 4
-        forest_score = min(counts["forest"], 5) / 5
-        total += tree_score * 0.55 + shrub_score * 0.2 + forest_score * 0.25
+    route_km = max(float(route["distance"]) / 1_000, 0.1)
+    score = sum(
+        min(counts[greenery_type] / route_km / full_score_density, 1.0)
+        * GREENERY_WEIGHTS[greenery_type]
+        for greenery_type, full_score_density in FULL_SCORE_DENSITY_PER_KM.items()
+    )
 
     return {
         **route,
-        "greenScore": _js_round(total / len(samples) * 100),
-        "sampleCount": len(samples),
+        "greenScore": _js_round(score * 100),
+        "sampleCount": len(route["geometry"]["coordinates"]),
     }
 
 
@@ -153,8 +84,8 @@ def _point_to_segment_distance_projected(
 def _build_segment_grid(
     coordinates: list[Coordinate],
     *,
-    cell_size: float = 180,
-    padding: float = 150,
+    cell_size: float = 40,
+    padding: float = GREENERY_CORRIDOR_METERS,
 ) -> tuple[
     dict[tuple[int, int], list[tuple[tuple[float, float], tuple[float, float]]]],
     float,
@@ -182,9 +113,9 @@ def _select_route_greenery(points: list[Point], route: Route) -> dict[str, Any]:
     for point in points:
         point_x, point_y = to_meters([point["lon"], point["lat"]])
         key = (math.floor(point_x / cell_size), math.floor(point_y / cell_size))
-        radius = 150 if point["type"] == "forest" else 110
         if any(
-            _point_to_segment_distance_projected(point_x, point_y, start, end) <= radius
+            _point_to_segment_distance_projected(point_x, point_y, start, end)
+            <= GREENERY_CORRIDOR_METERS
             for start, end in segment_grid.get(key, [])
         ):
             nearby.append(point)
@@ -193,8 +124,7 @@ def _select_route_greenery(points: list[Point], route: Route) -> dict[str, Any]:
     for point in nearby:
         counts[point["type"]] += 1
 
-    stride = max(1, math.ceil(len(nearby) / 450))
-    return {"points": nearby[::stride], "counts": counts}
+    return {"points": nearby, "counts": counts}
 
 
 def build_route_response(
@@ -214,12 +144,12 @@ def build_route_response(
         if bounds["west"] <= point["lon"] <= bounds["east"]
         and bounds["south"] <= point["lat"] <= bounds["north"]
     ]
-    point_grid, cell_size = _build_point_grid(corridor_points)
     shortest_distance = min(route["distance"] for route in routes)
     scored_routes: list[Route] = []
 
     for route in routes:
-        scored = _score_route(route, point_grid, cell_size, bool(corridor_points))
+        route_greenery = _select_route_greenery(corridor_points, route)
+        scored = _score_route(route, route_greenery["counts"], bool(corridor_points))
         detour_percent = _js_round(
             (route["distance"] - shortest_distance) / shortest_distance * 100
         )
@@ -229,20 +159,17 @@ def build_route_response(
             {
                 **scored,
                 "detourPercent": detour_percent,
+                "greenery": route_greenery["points"],
+                "ecoCounts": route_greenery["counts"],
                 "_rankScore": rank_score,
             }
         )
 
     selected = max(scored_routes, key=lambda route: route["_rankScore"])
-    public_routes = []
-    for route in scored_routes:
-        route_greenery = _select_route_greenery(corridor_points, route)
-        public_route = {
-            **{key: value for key, value in route.items() if key != "_rankScore"},
-            "greenery": route_greenery["points"],
-            "ecoCounts": route_greenery["counts"],
-        }
-        public_routes.append(public_route)
+    public_routes = [
+        {key: value for key, value in route.items() if key != "_rankScore"}
+        for route in scored_routes
+    ]
 
     selected_route = next(route for route in public_routes if route["id"] == selected["id"])
 

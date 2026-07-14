@@ -14,8 +14,9 @@ repository's Node/Vercel backend and preserves its existing API contract.
 - Requests pedestrian or bicycle alternatives from Valhalla.
 - Loads current tree, shrub, and forest inventories from Warsaw Open Data.
 - Discovers districts across the route instead of checking only its midpoint.
-- Samples every route and scores nearby greenery.
+- Scores every route using only greenery within 5 metres of its route line.
 - Returns route-specific greenery points and counts for every alternative.
+- Returns every qualifying record without thinning map points.
 - Selects the best green route after applying a detour penalty.
 - Optionally returns live Warsaw air-quality stations.
 
@@ -67,8 +68,9 @@ compatibility. Coordinate origins may be outside Warsaw when the routing provide
 coverage, while destination search remains focused on Warsaw. Green scores use Warsaw's
 inventory and therefore only reflect the part of a route covered by that data. `mode`
 accepts `walking` or `cycling`. The response contains resolved endpoints, route
-alternatives, the selected route ID, green scores, greenery points and counts, warnings
-for partially unavailable inventories, and a calculation timestamp.
+alternatives, the selected route ID, green scores, all greenery points within 5 metres
+and their counts, warnings for partially unavailable inventories, and a calculation
+timestamp.
 
 ### `GET /api/air`
 

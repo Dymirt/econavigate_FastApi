@@ -224,7 +224,7 @@ class EcoService:
         )
         digest = hashlib.sha256(fingerprint.encode()).hexdigest()
         return await self.cache.get_or_load(
-            f"v2:route:{digest}",
+            f"v3:route:{digest}",
             self.settings.route_cache_ttl_seconds,
             lambda: self._build_green_route(request),
         )
