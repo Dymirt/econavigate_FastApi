@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     http_max_connections: int = 30
     http_max_keepalive_connections: int = 15
     nominatim_min_interval_seconds: float = 1.1
-    max_greenery_records: int = 50_000
+    greenery_page_size: int = 20_000
 
     @property
     def cors_origin_list(self) -> list[str]:

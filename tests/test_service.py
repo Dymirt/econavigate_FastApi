@@ -7,7 +7,7 @@ from econavigate.cache import PersistentTTLCache
 from econavigate.config import Settings
 from econavigate.errors import ApiError
 from econavigate.models import CurrentLocation
-from econavigate.service import EcoService, route_district_probes
+from econavigate.service import EcoService
 
 
 def make_service(tmp_path) -> EcoService:
@@ -56,34 +56,39 @@ async def test_reverse_lookup_failure_does_not_reject_current_location(tmp_path)
     await service.cache.close()
 
 
-def test_route_district_probes_cover_the_route_inside_warsaw():
-    coordinates = [
-        [20.80, 52.20],
-        [20.86, 52.20],
-        [20.94, 52.21],
-        [21.02, 52.22],
-        [21.10, 52.23],
-        [21.18, 52.24],
-        [21.26, 52.25],
-        [21.30, 52.25],
-    ]
-    routes = [
-        {
-            "distance": 20_000,
-            "geometry": {"type": "LineString", "coordinates": coordinates},
+@pytest.mark.asyncio
+async def test_complete_greenery_resource_is_loaded_with_pagination(tmp_path):
+    service = make_service(tmp_path)
+
+    def record(identifier, longitude):
+        return {
+            "_id": identifier,
+            "x_wgs84": longitude,
+            "y_wgs84": 52.2,
+            "gatunek": "oak",
+            "stan_zdrowia": "good",
+            "dzielnica": "Śródmieście",
+            "adres": "Test street",
         }
+
+    service.upstream.get_json.side_effect = [
+        {"result": {"records": [record(1, 21.0), record(2, 21.01)], "total": 3}},
+        {"result": {"records": [record(3, 21.02)], "total": 3}},
     ]
 
-    assert route_district_probes(routes) == [
-        [20.94, 52.21],
-        [21.02, 52.22],
-        [21.10, 52.23],
-        [21.18, 52.24],
-    ]
+    points = await service._fetch_greenery_resource("tree")
+
+    assert [point["id"] for point in points] == ["tree-1", "tree-2", "tree-3"]
+    first_params = service.upstream.get_json.await_args_list[0].kwargs["params"]
+    second_params = service.upstream.get_json.await_args_list[1].kwargs["params"]
+    assert first_params["offset"] == "0"
+    assert second_params["offset"] == "2"
+    assert "filters" not in first_params
+    await service.cache.close()
 
 
 @pytest.mark.asyncio
-async def test_tree_waypoints_are_sent_as_ordered_through_locations(tmp_path):
+async def test_green_corridor_waypoints_are_sent_as_ordered_through_locations(tmp_path):
     service = make_service(tmp_path)
     service.upstream.get_json.return_value = {
         "code": "Ok",
@@ -110,7 +115,7 @@ async def test_tree_waypoints_are_sent_as_ordered_through_locations(tmp_path):
         "walking",
         waypoints=waypoints,
         alternates=0,
-        route_kind="tree-guided",
+        route_kind="green-corridor",
     )
 
     request_json = json.loads(service.upstream.get_json.await_args.kwargs["params"]["json"])
@@ -121,7 +126,7 @@ async def test_tree_waypoints_are_sent_as_ordered_through_locations(tmp_path):
         {"lat": 52.201, "lon": 21.007, "type": "through"},
         {"lat": 52.2, "lon": 21.01},
     ]
-    assert routes[0]["id"] == "tree-guided"
-    assert routes[0]["routeKind"] == "tree-guided"
+    assert routes[0]["id"] == "green-corridor"
+    assert routes[0]["routeKind"] == "green-corridor"
     assert routes[0]["greenWaypoints"] == waypoints
     await service.cache.close()

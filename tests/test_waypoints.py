@@ -1,43 +1,68 @@
-from econavigate.waypoints import select_green_waypoints
+import pytest
+
+from econavigate.waypoints import build_green_corridor_waypoints
 
 
-def _tree(identifier: str, lon: float, lat: float = 52.2):
+def _greenery(identifier: str, lon: float, lat: float, greenery_type: str = "tree"):
     return {
         "id": identifier,
-        "type": "tree",
+        "type": greenery_type,
         "lon": lon,
         "lat": lat,
         "district": "Śródmieście",
-        "name": "Tree",
+        "name": "Greenery",
         "detail": "good",
     }
 
 
-def test_selects_ordered_waypoints_from_tree_clusters_near_route():
+def test_citywide_optimizer_chooses_green_corridor_away_from_barren_direct_line():
     route = {
         "id": "route-1",
-        "distance": 5_400.0,
+        "distance": 4_100.0,
         "geometry": {
             "type": "LineString",
-            "coordinates": [[21.0, 52.2], [21.08, 52.2]],
+            "coordinates": [[21.0, 52.2], [21.06, 52.2]],
         },
     }
-    first_cluster = [_tree(f"west-{index}", 21.015 + index * 0.00001) for index in range(8)]
-    second_cluster = [_tree(f"east-{index}", 21.06 + index * 0.00001) for index in range(12)]
-    far_away = [_tree(f"far-{index}", 21.04, 52.21) for index in range(30)]
+    green_band = [
+        _greenery(f"tree-{index}", 21.002 + index * 0.0015, 52.205) for index in range(38)
+    ]
 
-    waypoints = select_green_waypoints(
-        route,
-        [*first_cluster, *second_cluster, *far_away],
+    waypoints = build_green_corridor_waypoints(route, green_band)
+
+    assert len(waypoints) >= 3
+    assert all(waypoint["lat"] == 52.205 for waypoint in waypoints)
+    assert [waypoint["lon"] for waypoint in waypoints] == sorted(
+        waypoint["lon"] for waypoint in waypoints
     )
-
-    assert len(waypoints) == 2
-    assert waypoints[0]["lon"] < waypoints[1]["lon"]
-    assert all(waypoint["type"] == "through" for waypoint in waypoints)
-    assert {waypoint["treeCount"] for waypoint in waypoints} == {8, 12}
+    assert all(waypoint["treeCount"] > 0 for waypoint in waypoints)
 
 
-def test_returns_no_waypoints_without_trees_near_route():
+@pytest.mark.parametrize(
+    ("greenery_type", "count_field"),
+    [("tree", "treeCount"), ("shrub", "shrubCount"), ("forest", "forestCount")],
+)
+def test_citywide_optimizer_uses_trees_shrubs_and_forests(greenery_type, count_field):
+    route = {
+        "id": "route-1",
+        "distance": 2_000.0,
+        "geometry": {
+            "type": "LineString",
+            "coordinates": [[21.0, 52.2], [21.03, 52.2]],
+        },
+    }
+    greenery = [
+        _greenery(f"{greenery_type}-{index}", 21.006 + index * 0.002, 52.201, greenery_type)
+        for index in range(10)
+    ]
+
+    waypoints = build_green_corridor_waypoints(route, greenery)
+
+    assert waypoints
+    assert sum(waypoint[count_field] for waypoint in waypoints) > 0
+
+
+def test_citywide_optimizer_returns_no_waypoints_without_greenery():
     route = {
         "id": "route-1",
         "distance": 1_000.0,
@@ -47,4 +72,4 @@ def test_returns_no_waypoints_without_trees_near_route():
         },
     }
 
-    assert select_green_waypoints(route, [_tree("far", 21.005, 52.21)]) == []
+    assert build_green_corridor_waypoints(route, []) == []

@@ -13,14 +13,15 @@ repository's Node/Vercel backend and preserves its existing API contract.
 - Geocodes Warsaw addresses with Nominatim.
 - Requests pedestrian or bicycle alternatives from Valhalla.
 - Loads current tree, shrub, and forest inventories from Warsaw Open Data.
-- Discovers districts across the route instead of checking only its midpoint.
-- Selects ordered waypoints from dense tree clusters near the direct corridor.
-- Sends those waypoints to Valhalla as `through` locations to generate a new route.
+- Paginates through every Warsaw tree, shrub, and forest record before optimization.
+- Builds a citywide 120-metre green-density grid from the complete inventory.
+- Uses A* with a strong empty-area penalty to find a continuous green corridor.
+- Sends ordered corridor anchors to Valhalla as `through` locations to generate a route.
 - Scores every route using only greenery within 5 metres of its route line.
 - Returns route-specific greenery points and counts for every alternative.
 - Returns every qualifying record without thinning map points.
 - Selects the best green route after applying a detour penalty.
-- Rejects a generated tree route when it exceeds a 35% or 5 km detour, whichever is lower.
+- Rejects a generated green route when it exceeds a 35% or 5 km detour, whichever is lower.
 - Optionally returns live Warsaw air-quality stations.
 
 No routing or map key is required by the current implementation. Valhalla and
@@ -30,9 +31,9 @@ with an SLA and follow its usage policy.
 
 ## Performance and caching
 
-The API is asynchronous and reuses a pooled HTTP client. CPU-heavy route scoring runs
-outside the async event loop. A spatial grid limits distance calculations to nearby
-route segments instead of comparing every tree with every segment.
+The API is asynchronous and reuses a pooled HTTP client. CPU-heavy corridor search and
+route scoring run outside the async event loop. Spatial grids make the citywide A*
+search and exact 5-metre route filtering practical with the complete inventory.
 
 Responses are cached in a persistent DiskCache database:
 
@@ -45,8 +46,9 @@ Responses are cached in a persistent DiskCache database:
 
 The cache survives process restarts when `CACHE_DIR` is backed by a persistent Docker
 volume. Concurrent requests for the same uncached item are coalesced per worker.
-Deploy one container with two workers first; increase replicas only when the upstream
-services and host capacity can support the extra cold-cache requests.
+The production image runs one worker to keep the complete in-memory inventory within
+the 1 GB Compose limit. Increase workers only after increasing memory and measuring
+real route workloads.
 
 ## API
 
@@ -72,9 +74,10 @@ coverage, while destination search remains focused on Warsaw. Green scores use W
 inventory and therefore only reflect the part of a route covered by that data. `mode`
 accepts `walking` or `cycling`. The response contains resolved endpoints, route
 alternatives, the selected route ID, green scores, all greenery points within 5 metres
-and their counts, warnings for partially unavailable inventories, and a calculation
-timestamp. `routingStrategy` reports whether tree waypoints produced an accepted route,
-and `greenWaypoints` contains the ordered intermediate tree-cluster anchors.
+and their counts, complete citywide `inventoryCounts`, warnings for partially unavailable
+inventories, and a calculation timestamp. `routingStrategy` reports whether the citywide
+green corridor produced an accepted route, and `greenWaypoints` contains its ordered
+intermediate anchors.
 
 ### `GET /api/air`
 
@@ -127,8 +130,8 @@ pytest
    with the host or network firewall; do not expose it directly to the internet.
 5. Verify `https://your-api-domain.example/api/health` and `/docs`.
 
-The Compose file publishes port 8000 on the server's network interfaces, runs two
-Uvicorn workers, restarts the service after failures, and stores cached data in the
+The Compose file publishes port 8000 on the server's network interfaces, runs one
+Uvicorn worker, restarts the service after failures, and stores cached data in the
 `eco-cache` volume.
 
 For example, a Cloudflare Tunnel connector on the same LAN can use

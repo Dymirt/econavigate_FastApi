@@ -1,20 +1,29 @@
 from __future__ import annotations
 
+import heapq
 import math
-from collections import defaultdict
-from itertools import pairwise
 from typing import Any
 
 Coordinate = list[float]
+GridKey = tuple[int, int]
 Point = dict[str, Any]
 Route = dict[str, Any]
 
-MAX_GREEN_WAYPOINTS = 4
-MAX_ROUTE_CORRIDOR_METERS = 300.0
-MIN_ROUTE_CORRIDOR_METERS = 70.0
-CORRIDOR_DISTANCE_RATIO = 0.05
-CLUSTER_CELL_METERS = 60.0
-WAYPOINT_SPACING_METERS = 1_200.0
+CELL_SIZE_METERS = 120.0
+MAX_GREEN_WAYPOINTS = 8
+WAYPOINT_SPACING_METERS = 900.0
+BARREN_AREA_PENALTY = 6.0
+GREEN_SATURATION_SCORE = 14.0
+SEARCH_DETOUR_RATIO = 1.8
+SEARCH_EXTRA_METERS = 5_000.0
+WARSAW_GREEN_BOUNDS = {
+    "west": 20.8517,
+    "south": 52.0978,
+    "east": 21.2712,
+    "north": 52.3681,
+}
+GREENERY_WEIGHTS = {"tree": 1.0, "shrub": 0.6, "forest": 10.0}
+REPRESENTATIVE_PRIORITY = {"tree": 3, "shrub": 2, "forest": 1}
 
 
 def _to_meters(coordinate: Coordinate) -> tuple[float, float]:
@@ -22,175 +31,256 @@ def _to_meters(coordinate: Coordinate) -> tuple[float, float]:
     return longitude * 67_800, latitude * 111_320
 
 
-def _route_segment_grid(
-    coordinates: list[Coordinate], corridor: float
-) -> tuple[
-    dict[
-        tuple[int, int],
-        list[tuple[tuple[float, float], tuple[float, float], float, float]],
-    ],
-    float,
-    float,
-]:
-    projected = [_to_meters(coordinate) for coordinate in coordinates]
-    cell_size = max(corridor, 100.0)
-    grid: dict[
-        tuple[int, int],
-        list[tuple[tuple[float, float], tuple[float, float], float, float]],
-    ] = defaultdict(list)
-    distance_from_start = 0.0
-
-    for start, end in pairwise(projected):
-        segment_length = math.dist(start, end)
-        min_x = math.floor((min(start[0], end[0]) - corridor) / cell_size)
-        max_x = math.floor((max(start[0], end[0]) + corridor) / cell_size)
-        min_y = math.floor((min(start[1], end[1]) - corridor) / cell_size)
-        max_y = math.floor((max(start[1], end[1]) + corridor) / cell_size)
-        segment = (start, end, distance_from_start, segment_length)
-        for cell_x in range(min_x, max_x + 1):
-            for cell_y in range(min_y, max_y + 1):
-                grid[(cell_x, cell_y)].append(segment)
-        distance_from_start += segment_length
-
-    return grid, cell_size, distance_from_start
+def _from_meters(x: float, y: float) -> Coordinate:
+    return [x / 67_800, y / 111_320]
 
 
-def _project_point(
-    point: Point,
-    segments: list[tuple[tuple[float, float], tuple[float, float], float, float]],
-) -> tuple[float, float] | None:
-    point_x, point_y = _to_meters([point["lon"], point["lat"]])
-    best: tuple[float, float] | None = None
+def _grid_key(coordinate: Coordinate) -> GridKey:
+    x, y = _to_meters(coordinate)
+    return math.floor(x / CELL_SIZE_METERS), math.floor(y / CELL_SIZE_METERS)
 
-    for start, end, distance_from_start, segment_length in segments:
-        delta_x = end[0] - start[0]
-        delta_y = end[1] - start[1]
-        length_squared = delta_x * delta_x + delta_y * delta_y
-        ratio = 0.0
-        if length_squared:
-            ratio = max(
-                0.0,
-                min(
-                    1.0,
-                    ((point_x - start[0]) * delta_x + (point_y - start[1]) * delta_y)
-                    / length_squared,
+
+def _cell_center(key: GridKey) -> Coordinate:
+    return _from_meters(
+        (key[0] + 0.5) * CELL_SIZE_METERS,
+        (key[1] + 0.5) * CELL_SIZE_METERS,
+    )
+
+
+def _inside_warsaw(coordinate: Coordinate) -> bool:
+    longitude, latitude = coordinate
+    return (
+        WARSAW_GREEN_BOUNDS["west"] <= longitude <= WARSAW_GREEN_BOUNDS["east"]
+        and WARSAW_GREEN_BOUNDS["south"] <= latitude <= WARSAW_GREEN_BOUNDS["north"]
+    )
+
+
+def _build_green_grid(points: list[Point]) -> dict[GridKey, dict[str, Any]]:
+    grid: dict[GridKey, dict[str, Any]] = {}
+    for point in points:
+        greenery_type = point.get("type")
+        if greenery_type not in GREENERY_WEIGHTS:
+            continue
+        coordinate = [point["lon"], point["lat"]]
+        if not _inside_warsaw(coordinate):
+            continue
+        key = _grid_key(coordinate)
+        cell = grid.setdefault(
+            key,
+            {
+                "weightedCount": 0.0,
+                "counts": {"tree": 0, "shrub": 0, "forest": 0},
+                "representative": point,
+            },
+        )
+        cell["weightedCount"] += GREENERY_WEIGHTS[greenery_type]
+        cell["counts"][greenery_type] += 1
+        current_type = cell["representative"]["type"]
+        if REPRESENTATIVE_PRIORITY[greenery_type] > REPRESENTATIVE_PRIORITY[current_type]:
+            cell["representative"] = point
+    return grid
+
+
+def _green_level(grid: dict[GridKey, dict[str, Any]], key: GridKey) -> float:
+    weighted_score = 0.0
+    for offset_x in range(-1, 2):
+        for offset_y in range(-1, 2):
+            cell = grid.get((key[0] + offset_x, key[1] + offset_y))
+            if not cell:
+                continue
+            if offset_x == 0 and offset_y == 0:
+                influence = 1.0
+            elif offset_x == 0 or offset_y == 0:
+                influence = 0.4
+            else:
+                influence = 0.2
+            weighted_score += cell["weightedCount"] * influence
+    return 1.0 - math.exp(-weighted_score / GREEN_SATURATION_SCORE)
+
+
+def _grid_distance(first: GridKey, second: GridKey) -> float:
+    return math.hypot(first[0] - second[0], first[1] - second[1]) * CELL_SIZE_METERS
+
+
+def _warsaw_grid_bounds() -> tuple[int, int, int, int]:
+    west, south = _grid_key([WARSAW_GREEN_BOUNDS["west"], WARSAW_GREEN_BOUNDS["south"]])
+    east, north = _grid_key([WARSAW_GREEN_BOUNDS["east"], WARSAW_GREEN_BOUNDS["north"]])
+    return west, south, east, north
+
+
+def _neighbors(key: GridKey) -> list[GridKey]:
+    return [
+        (key[0] + offset_x, key[1] + offset_y)
+        for offset_x in range(-1, 2)
+        for offset_y in range(-1, 2)
+        if offset_x or offset_y
+    ]
+
+
+def _green_corridor_path(
+    grid: dict[GridKey, dict[str, Any]], start: GridKey, destination: GridKey
+) -> list[GridKey]:
+    west, south, east, north = _warsaw_grid_bounds()
+    direct_distance = max(_grid_distance(start, destination), CELL_SIZE_METERS)
+    search_limit = min(
+        direct_distance * SEARCH_DETOUR_RATIO,
+        direct_distance + SEARCH_EXTRA_METERS,
+    )
+    frontier: list[tuple[float, GridKey]] = [(0.0, start)]
+    came_from: dict[GridKey, GridKey] = {}
+    cost_so_far = {start: 0.0}
+    green_levels: dict[GridKey, float] = {}
+
+    while frontier:
+        _, current = heapq.heappop(frontier)
+        if current == destination:
+            break
+
+        for neighbor in _neighbors(current):
+            if not (west <= neighbor[0] <= east and south <= neighbor[1] <= north):
+                continue
+            if (
+                _grid_distance(start, neighbor) + _grid_distance(neighbor, destination)
+                > search_limit
+            ):
+                continue
+
+            step_distance = _grid_distance(current, neighbor)
+            level = green_levels.setdefault(neighbor, _green_level(grid, neighbor))
+            step_cost = step_distance * (1.0 + BARREN_AREA_PENALTY * (1.0 - level))
+            new_cost = cost_so_far[current] + step_cost
+            if new_cost >= cost_so_far.get(neighbor, math.inf):
+                continue
+            cost_so_far[neighbor] = new_cost
+            priority = new_cost + _grid_distance(neighbor, destination)
+            heapq.heappush(frontier, (priority, neighbor))
+            came_from[neighbor] = current
+
+    if destination not in cost_so_far:
+        return []
+
+    path = [destination]
+    while path[-1] != start:
+        path.append(came_from[path[-1]])
+    path.reverse()
+    return path
+
+
+def _nearby_counts(grid: dict[GridKey, dict[str, Any]], key: GridKey) -> dict[str, int]:
+    counts = {"tree": 0, "shrub": 0, "forest": 0}
+    for offset_x in range(-1, 2):
+        for offset_y in range(-1, 2):
+            cell = grid.get((key[0] + offset_x, key[1] + offset_y))
+            if not cell:
+                continue
+            for greenery_type, count in cell["counts"].items():
+                counts[greenery_type] += count
+    return counts
+
+
+def _corridor_waypoints(
+    path: list[GridKey],
+    grid: dict[GridKey, dict[str, Any]],
+    *,
+    max_waypoints: int,
+) -> list[dict[str, Any]]:
+    candidates = []
+    for index, path_key in enumerate(path[2:-2], start=2):
+        nearby_green_cells = [
+            (path_key[0] + offset_x, path_key[1] + offset_y)
+            for offset_x in range(-1, 2)
+            for offset_y in range(-1, 2)
+            if (path_key[0] + offset_x, path_key[1] + offset_y) in grid
+        ]
+        if nearby_green_cells:
+            candidates.append(
+                (
+                    index,
+                    max(
+                        nearby_green_cells,
+                        key=lambda key: (
+                            _green_level(grid, key),
+                            grid[key]["weightedCount"],
+                        ),
+                    ),
+                )
+            )
+    if not candidates:
+        return []
+
+    path_distance = max((len(path) - 1) * CELL_SIZE_METERS, CELL_SIZE_METERS)
+    waypoint_count = min(
+        max_waypoints,
+        max(1, math.ceil(path_distance / WAYPOINT_SPACING_METERS)),
+        len(candidates),
+    )
+    bin_width = max(len(path) / waypoint_count, 1.0)
+    bins: list[list[tuple[int, GridKey]]] = [[] for _ in range(waypoint_count)]
+    for index, key in candidates:
+        bin_index = min(waypoint_count - 1, int(index / bin_width))
+        bins[bin_index].append((index, key))
+
+    selected: list[tuple[int, GridKey]] = []
+    for bin_candidates in bins:
+        if not bin_candidates:
+            continue
+        selected.append(
+            max(
+                bin_candidates,
+                key=lambda candidate: (
+                    _green_level(grid, candidate[1]),
+                    grid[candidate[1]]["weightedCount"],
                 ),
             )
-        projected_x = start[0] + ratio * delta_x
-        projected_y = start[1] + ratio * delta_y
-        lateral_distance = math.hypot(point_x - projected_x, point_y - projected_y)
-        progress = distance_from_start + ratio * segment_length
-        if best is None or lateral_distance < best[0]:
-            best = (lateral_distance, progress)
+        )
+    selected.sort()
 
-    return best
+    waypoints = []
+    seen_coordinates = set()
+    for _, key in selected:
+        point = grid[key]["representative"]
+        coordinate_key = (round(point["lat"], 6), round(point["lon"], 6))
+        if coordinate_key in seen_coordinates:
+            continue
+        seen_coordinates.add(coordinate_key)
+        counts = _nearby_counts(grid, key)
+        waypoints.append(
+            {
+                "lat": point["lat"],
+                "lon": point["lon"],
+                "type": "through",
+                "treeCount": counts["tree"],
+                "shrubCount": counts["shrub"],
+                "forestCount": counts["forest"],
+                "greenLevel": round(_green_level(grid, key) * 100),
+            }
+        )
+    return waypoints
 
 
-def select_green_waypoints(
-    route: Route,
+def build_green_corridor_waypoints(
+    baseline_route: Route,
     greenery: list[Point],
     *,
     max_waypoints: int = MAX_GREEN_WAYPOINTS,
 ) -> list[dict[str, Any]]:
-    """Choose ordered waypoints through dense tree clusters near a baseline route."""
+    """Build a citywide low-cost path through green cells, then return route anchors."""
 
-    if max_waypoints < 1:
+    if max_waypoints < 1 or not greenery:
+        return []
+    coordinates = baseline_route["geometry"]["coordinates"]
+    warsaw_coordinates = [coordinate for coordinate in coordinates if _inside_warsaw(coordinate)]
+    if len(warsaw_coordinates) < 2:
         return []
 
-    corridor = min(
-        MAX_ROUTE_CORRIDOR_METERS,
-        max(MIN_ROUTE_CORRIDOR_METERS, float(route["distance"]) * CORRIDOR_DISTANCE_RATIO),
-    )
-    segment_grid, segment_cell_size, route_length = _route_segment_grid(
-        route["geometry"]["coordinates"], corridor
-    )
-    if route_length <= 0:
+    grid = _build_green_grid(greenery)
+    if not grid:
         return []
-
-    clusters: dict[tuple[int, int], dict[str, Any]] = {}
-    for point in greenery:
-        if point.get("type") != "tree":
-            continue
-        point_x, point_y = _to_meters([point["lon"], point["lat"]])
-        segment_key = (
-            math.floor(point_x / segment_cell_size),
-            math.floor(point_y / segment_cell_size),
-        )
-        projection = _project_point(point, segment_grid.get(segment_key, []))
-        if projection is None or projection[0] > corridor:
-            continue
-        lateral_distance, progress = projection
-        if progress < route_length * 0.05 or progress > route_length * 0.95:
-            continue
-
-        cluster_key = (
-            math.floor(point_x / CLUSTER_CELL_METERS),
-            math.floor(point_y / CLUSTER_CELL_METERS),
-        )
-        cluster = clusters.setdefault(
-            cluster_key,
-            {
-                "count": 0,
-                "progressTotal": 0.0,
-                "bestPoint": point,
-                "bestDistance": lateral_distance,
-            },
-        )
-        cluster["count"] += 1
-        cluster["progressTotal"] += progress
-        if lateral_distance < cluster["bestDistance"]:
-            cluster["bestPoint"] = point
-            cluster["bestDistance"] = lateral_distance
-
-    candidates = []
-    for cluster_key, cluster in clusters.items():
-        density_count = sum(
-            clusters.get(
-                (cluster_key[0] + offset_x, cluster_key[1] + offset_y),
-                {"count": 0},
-            )["count"]
-            for offset_x in range(-1, 2)
-            for offset_y in range(-1, 2)
-        )
-        candidates.append(
-            {
-                **cluster,
-                "densityCount": density_count,
-                "progress": cluster["progressTotal"] / cluster["count"],
-                "score": density_count * 10 - cluster["bestDistance"] / corridor,
-            }
-        )
-    if not candidates:
+    start = _grid_key(warsaw_coordinates[0])
+    destination = _grid_key(warsaw_coordinates[-1])
+    if start == destination:
         return []
-
-    minimum_progress = min(candidate["progress"] for candidate in candidates)
-    maximum_progress = max(candidate["progress"] for candidate in candidates)
-    tree_covered_distance = max(0.0, maximum_progress - minimum_progress)
-    waypoint_count = min(
-        max_waypoints,
-        max(1, math.ceil(tree_covered_distance / WAYPOINT_SPACING_METERS)),
-    )
-    bin_width = max(tree_covered_distance / waypoint_count, 1.0)
-    bins: list[list[dict[str, Any]]] = [[] for _ in range(waypoint_count)]
-    for candidate in candidates:
-        bin_index = min(
-            waypoint_count - 1,
-            int((candidate["progress"] - minimum_progress) / bin_width),
-        )
-        bins[bin_index].append(candidate)
-
-    selected = [
-        max(bin_candidates, key=lambda candidate: candidate["score"])
-        for bin_candidates in bins
-        if bin_candidates
-    ]
-    selected.sort(key=lambda candidate: candidate["progress"])
-    return [
-        {
-            "lat": candidate["bestPoint"]["lat"],
-            "lon": candidate["bestPoint"]["lon"],
-            "type": "through",
-            "treeCount": candidate["densityCount"],
-        }
-        for candidate in selected
-    ]
+    path = _green_corridor_path(grid, start, destination)
+    if not path:
+        return []
+    return _corridor_waypoints(path, grid, max_waypoints=max_waypoints)

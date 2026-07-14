@@ -16,19 +16,13 @@ from .errors import ApiError
 from .models import CurrentLocation, RouteRequest
 from .scoring import build_route_response
 from .upstream import UpstreamClient
-from .waypoints import select_green_waypoints
+from .waypoints import build_green_corridor_waypoints
 
 T = TypeVar("T")
-MAX_TREE_ROUTE_DETOUR_RATIO = 1.35
-MAX_TREE_ROUTE_EXTRA_METERS = 5_000.0
+MAX_GREEN_ROUTE_DETOUR_RATIO = 1.35
+MAX_GREEN_ROUTE_EXTRA_METERS = 5_000.0
 
 WARSAW_VIEWBOX = "20.8517,52.3681,21.2712,52.0978"
-WARSAW_DATA_BOUNDS = {
-    "west": 20.8517,
-    "south": 52.0978,
-    "east": 21.2712,
-    "north": 52.3681,
-}
 GREENERY_RESOURCES = {
     "tree": {
         "id": "ed6217dd-c8d0-4f7b-8bed-3b7eb81a95ba",
@@ -93,28 +87,6 @@ def resolve_district(address: dict[str, Any], display_name: str) -> str | None:
         if any(alias in candidate for candidate in normalized_candidates):
             return official_name
     return None
-
-
-def route_district_probes(routes: list[dict[str, Any]], count: int = 8) -> list[list[float]]:
-    """Pick evenly spaced points from the part of the fastest route inside Warsaw."""
-
-    fastest_route = min(routes, key=lambda route: route["distance"])
-    coordinates = [
-        coordinate
-        for coordinate in fastest_route["geometry"]["coordinates"]
-        if (
-            WARSAW_DATA_BOUNDS["west"] <= coordinate[0] <= WARSAW_DATA_BOUNDS["east"]
-            and WARSAW_DATA_BOUNDS["south"] <= coordinate[1] <= WARSAW_DATA_BOUNDS["north"]
-        )
-    ]
-    if not coordinates:
-        return []
-
-    indexes = {
-        round((len(coordinates) - 1) * sample_number / (count + 1))
-        for sample_number in range(1, count + 1)
-    }
-    return [coordinates[index] for index in sorted(indexes)]
 
 
 def _normalize_place(result: dict[str, Any]) -> dict[str, Any]:
@@ -227,7 +199,7 @@ class EcoService:
         )
         digest = hashlib.sha256(fingerprint.encode()).hexdigest()
         return await self.cache.get_or_load(
-            f"v4:route:{digest}",
+            f"v5:route:{digest}",
             self.settings.route_cache_ttl_seconds,
             lambda: self._build_green_route(request),
         )
@@ -238,37 +210,15 @@ class EcoService:
             self._geocode(request.to_query),
         )
         baseline_routes = await self._fetch_routes(from_place, to_place, request.mode)
-
-        route_districts: list[str] = []
-        if from_place["district"] != to_place["district"]:
-            lookups = await asyncio.gather(
-                *(
-                    self._reverse_geocode(coordinate)
-                    for coordinate in route_district_probes(baseline_routes)
-                ),
-                return_exceptions=True,
-            )
-            route_districts = [
-                result["district"]
-                for result in lookups
-                if isinstance(result, dict) and result.get("district")
-            ]
-
-        districts = list(
-            dict.fromkeys(
-                district
-                for district in (
-                    from_place["district"],
-                    *route_districts,
-                    to_place["district"],
-                )
-                if district
-            )
-        )
-        greenery, warnings = await self._fetch_greenery(districts)
+        greenery, warnings = await self._fetch_greenery()
+        districts = sorted({str(point["district"]) for point in greenery if point.get("district")})
+        inventory_counts = {
+            greenery_type: sum(point["type"] == greenery_type for point in greenery)
+            for greenery_type in GREENERY_RESOURCES
+        }
         fastest_route = min(baseline_routes, key=lambda route: route["distance"])
         green_waypoints = await asyncio.to_thread(
-            select_green_waypoints,
+            build_green_corridor_waypoints,
             fastest_route,
             greenery,
         )
@@ -283,19 +233,19 @@ class EcoService:
                         request.mode,
                         waypoints=green_waypoints,
                         alternates=0,
-                        route_kind="tree-guided",
+                        route_kind="green-corridor",
                     )
                 )[0]
             except ApiError:
                 green_waypoints = []
             else:
-                maximum_tree_route_distance = min(
-                    fastest_route["distance"] * MAX_TREE_ROUTE_DETOUR_RATIO,
-                    fastest_route["distance"] + MAX_TREE_ROUTE_EXTRA_METERS,
+                maximum_green_route_distance = min(
+                    fastest_route["distance"] * MAX_GREEN_ROUTE_DETOUR_RATIO,
+                    fastest_route["distance"] + MAX_GREEN_ROUTE_EXTRA_METERS,
                 )
-                if generated_route["distance"] <= maximum_tree_route_distance:
+                if generated_route["distance"] <= maximum_green_route_distance:
                     routes = [generated_route, *baseline_routes[:2]]
-                    routing_strategy = "tree-waypoints"
+                    routing_strategy = "citywide-green-corridor"
                 else:
                     green_waypoints = []
 
@@ -313,6 +263,7 @@ class EcoService:
             **response,
             "routingStrategy": routing_strategy,
             "greenWaypoints": green_waypoints,
+            "inventoryCounts": inventory_counts,
         }
 
     async def _resolve_origin(self, origin: str | CurrentLocation) -> dict[str, Any]:
@@ -434,8 +385,8 @@ class EcoService:
         routes = []
         for index, route in enumerate(route_records):
             route_id = (
-                "tree-guided"
-                if route_kind == "tree-guided" and index == 0
+                "green-corridor"
+                if route_kind == "green-corridor" and index == 0
                 else f"route-{index + 1}"
             )
             routes.append(
@@ -444,8 +395,8 @@ class EcoService:
                     "distance": float(route["distance"]),
                     "duration": float(route["duration"]),
                     "summary": (
-                        "Tree-guided route"
-                        if route_kind == "tree-guided"
+                        "Citywide green corridor"
+                        if route_kind == "green-corridor"
                         else (route.get("legs") or [{}])[0].get("summary") or "Warsaw route"
                     ),
                     "geometry": route["geometry"],
@@ -455,53 +406,52 @@ class EcoService:
             )
         return routes
 
-    async def _fetch_greenery_resource(
-        self, greenery_type: str, district: str
-    ) -> list[dict[str, Any]]:
+    async def _fetch_greenery_resource(self, greenery_type: str) -> list[dict[str, Any]]:
         resource = GREENERY_RESOURCES[greenery_type]
-        key = f"v1:greenery:{greenery_type}:{normalize_text(district)}"
+        key = f"v2:greenery:all:{greenery_type}"
 
         async def load() -> list[dict[str, Any]]:
-            payload = await self.upstream.get_json(
-                f"{self.settings.warsaw_api_url}/datastore_search/",
-                source="Warsaw greenery data",
-                params={
-                    "resource_id": resource["id"],
-                    "filters": json.dumps({"dzielnica": district}, ensure_ascii=False),
-                    "fields": resource["fields"],
-                    "limit": str(self.settings.max_greenery_records),
-                },
-            )
-            result = payload.get("result") if isinstance(payload, dict) else None
-            records = result.get("records") if isinstance(result, dict) else None
-            if not isinstance(records, list):
-                raise ApiError("Warsaw greenery data had an unexpected format.", 502)
-            return [
-                point
-                for record in records
-                if (point := _normalize_greenery_record(greenery_type, record)) is not None
-            ]
+            normalized_records: list[dict[str, Any]] = []
+            offset = 0
+            while True:
+                payload = await self.upstream.get_json(
+                    f"{self.settings.warsaw_api_url}/datastore_search/",
+                    source=f"Warsaw {greenery_type} data",
+                    params={
+                        "resource_id": resource["id"],
+                        "fields": resource["fields"],
+                        "limit": str(self.settings.greenery_page_size),
+                        "offset": str(offset),
+                    },
+                )
+                result = payload.get("result") if isinstance(payload, dict) else None
+                records = result.get("records") if isinstance(result, dict) else None
+                if not isinstance(records, list):
+                    raise ApiError("Warsaw greenery data had an unexpected format.", 502)
+                normalized_records.extend(
+                    point
+                    for record in records
+                    if (point := _normalize_greenery_record(greenery_type, record)) is not None
+                )
+                offset += len(records)
+                total = int(result.get("total") or offset)
+                if not records or offset >= total:
+                    break
+            return normalized_records
 
         return await self.cache.get_or_load(key, self.settings.greenery_cache_ttl_seconds, load)
 
-    async def _fetch_greenery(self, districts: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
-        requests = [
-            (greenery_type, district)
-            for district in districts
-            for greenery_type in GREENERY_RESOURCES
-        ]
+    async def _fetch_greenery(self) -> tuple[list[dict[str, Any]], list[str]]:
+        greenery_types = list(GREENERY_RESOURCES)
         results = await asyncio.gather(
-            *(
-                self._fetch_greenery_resource(greenery_type, district)
-                for greenery_type, district in requests
-            ),
+            *(self._fetch_greenery_resource(greenery_type) for greenery_type in greenery_types),
             return_exceptions=True,
         )
         points_by_id: dict[str, dict[str, Any]] = {}
         warnings = []
-        for (greenery_type, district), result in zip(requests, results, strict=False):
+        for greenery_type, result in zip(greenery_types, results, strict=False):
             if isinstance(result, BaseException):
-                warnings.append(f"{greenery_type} data for {district} was unavailable")
+                warnings.append(f"Complete {greenery_type} data was unavailable")
             else:
                 points_by_id.update((point["id"], point) for point in result)
         return list(points_by_id.values()), warnings
