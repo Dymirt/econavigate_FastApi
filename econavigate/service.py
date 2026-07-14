@@ -20,6 +20,12 @@ from .upstream import UpstreamClient
 T = TypeVar("T")
 
 WARSAW_VIEWBOX = "20.8517,52.3681,21.2712,52.0978"
+WARSAW_DATA_BOUNDS = {
+    "west": 20.8517,
+    "south": 52.0978,
+    "east": 21.2712,
+    "north": 52.3681,
+}
 GREENERY_RESOURCES = {
     "tree": {
         "id": "ed6217dd-c8d0-4f7b-8bed-3b7eb81a95ba",
@@ -84,6 +90,28 @@ def resolve_district(address: dict[str, Any], display_name: str) -> str | None:
         if any(alias in candidate for candidate in normalized_candidates):
             return official_name
     return None
+
+
+def route_district_probes(routes: list[dict[str, Any]], count: int = 4) -> list[list[float]]:
+    """Pick evenly spaced points from the part of the fastest route inside Warsaw."""
+
+    fastest_route = min(routes, key=lambda route: route["distance"])
+    coordinates = [
+        coordinate
+        for coordinate in fastest_route["geometry"]["coordinates"]
+        if (
+            WARSAW_DATA_BOUNDS["west"] <= coordinate[0] <= WARSAW_DATA_BOUNDS["east"]
+            and WARSAW_DATA_BOUNDS["south"] <= coordinate[1] <= WARSAW_DATA_BOUNDS["north"]
+        )
+    ]
+    if not coordinates:
+        return []
+
+    indexes = {
+        round((len(coordinates) - 1) * sample_number / (count + 1))
+        for sample_number in range(1, count + 1)
+    }
+    return [coordinates[index] for index in sorted(indexes)]
 
 
 def _normalize_place(result: dict[str, Any]) -> dict[str, Any]:
@@ -196,7 +224,7 @@ class EcoService:
         )
         digest = hashlib.sha256(fingerprint.encode()).hexdigest()
         return await self.cache.get_or_load(
-            f"v1:route:{digest}",
+            f"v2:route:{digest}",
             self.settings.route_cache_ttl_seconds,
             lambda: self._build_green_route(request),
         )
@@ -207,23 +235,28 @@ class EcoService:
             self._geocode(request.to_query),
         )
         routes = await self._fetch_routes(from_place, to_place, request.mode)
-        fastest_route = min(routes, key=lambda route: route["distance"])
-        coordinates = fastest_route["geometry"]["coordinates"]
-        midpoint = coordinates[len(coordinates) // 2]
 
-        midpoint_district = None
+        route_districts: list[str] = []
         if from_place["district"] != to_place["district"]:
-            try:
-                midpoint_district = (await self._reverse_geocode(midpoint))["district"]
-            except ApiError:
-                midpoint_district = None
+            lookups = await asyncio.gather(
+                *(
+                    self._reverse_geocode(coordinate)
+                    for coordinate in route_district_probes(routes)
+                ),
+                return_exceptions=True,
+            )
+            route_districts = [
+                result["district"]
+                for result in lookups
+                if isinstance(result, dict) and result.get("district")
+            ]
 
         districts = list(
             dict.fromkeys(
                 district
                 for district in (
                     from_place["district"],
-                    midpoint_district,
+                    *route_districts,
                     to_place["district"],
                 )
                 if district

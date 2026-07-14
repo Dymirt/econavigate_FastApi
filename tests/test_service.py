@@ -6,7 +6,7 @@ from econavigate.cache import PersistentTTLCache
 from econavigate.config import Settings
 from econavigate.errors import ApiError
 from econavigate.models import CurrentLocation
-from econavigate.service import EcoService
+from econavigate.service import EcoService, route_district_probes
 
 
 def make_service(tmp_path) -> EcoService:
@@ -53,3 +53,29 @@ async def test_reverse_lookup_failure_does_not_reject_current_location(tmp_path)
         "district": None,
     }
     await service.cache.close()
+
+
+def test_route_district_probes_cover_the_route_inside_warsaw():
+    coordinates = [
+        [20.80, 52.20],
+        [20.86, 52.20],
+        [20.94, 52.21],
+        [21.02, 52.22],
+        [21.10, 52.23],
+        [21.18, 52.24],
+        [21.26, 52.25],
+        [21.30, 52.25],
+    ]
+    routes = [
+        {
+            "distance": 20_000,
+            "geometry": {"type": "LineString", "coordinates": coordinates},
+        }
+    ]
+
+    assert route_district_probes(routes) == [
+        [20.94, 52.21],
+        [21.02, 52.22],
+        [21.10, 52.23],
+        [21.18, 52.24],
+    ]

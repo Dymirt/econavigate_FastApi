@@ -51,3 +51,7 @@ def test_route_with_more_nearby_trees_is_selected():
     assert response["ecoCounts"]["tree"] == 19
     assert len(response["routes"]) == 2
     assert "_rankScore" not in response["routes"][0]
+    assert response["routes"][0]["ecoCounts"]["tree"] == 0
+    assert response["routes"][0]["greenery"] == []
+    assert response["routes"][1]["ecoCounts"]["tree"] == 19
+    assert len(response["routes"][1]["greenery"]) == 19

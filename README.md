@@ -13,7 +13,9 @@ repository's Node/Vercel backend and preserves its existing API contract.
 - Geocodes Warsaw addresses with Nominatim.
 - Requests pedestrian or bicycle alternatives from Valhalla.
 - Loads current tree, shrub, and forest inventories from Warsaw Open Data.
+- Discovers districts across the route instead of checking only its midpoint.
 - Samples every route and scores nearby greenery.
+- Returns route-specific greenery points and counts for every alternative.
 - Selects the best green route after applying a detour penalty.
 - Optionally returns live Warsaw air-quality stations.
 

@@ -234,11 +234,17 @@ def build_route_response(
         )
 
     selected = max(scored_routes, key=lambda route: route["_rankScore"])
-    route_greenery = _select_route_greenery(corridor_points, selected)
     public_routes = []
     for route in scored_routes:
-        public_route = {key: value for key, value in route.items() if key != "_rankScore"}
+        route_greenery = _select_route_greenery(corridor_points, route)
+        public_route = {
+            **{key: value for key, value in route.items() if key != "_rankScore"},
+            "greenery": route_greenery["points"],
+            "ecoCounts": route_greenery["counts"],
+        }
         public_routes.append(public_route)
+
+    selected_route = next(route for route in public_routes if route["id"] == selected["id"])
 
     return {
         "from": from_place,
@@ -247,8 +253,8 @@ def build_route_response(
         "districts": districts,
         "selectedRouteId": selected["id"],
         "routes": public_routes,
-        "greenery": route_greenery["points"],
-        "ecoCounts": route_greenery["counts"],
+        "greenery": selected_route["greenery"],
+        "ecoCounts": selected_route["ecoCounts"],
         "warnings": warnings,
         "calculatedAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
     }
