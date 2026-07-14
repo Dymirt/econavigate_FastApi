@@ -50,15 +50,21 @@ Interactive OpenAPI documentation is available at `/docs`.
 
 ```json
 {
-  "from": "Pałac Kultury i Nauki",
+  "from": {
+    "lat": 52.2317,
+    "lon": 21.006,
+    "label": "Your location"
+  },
   "to": "Łazienki Królewskie",
   "mode": "walking"
 }
 ```
 
-`mode` accepts `walking` or `cycling`. The response contains geocoded endpoints,
-route alternatives, the selected route ID, green scores, greenery points and counts,
-warnings for partially unavailable inventories, and a calculation timestamp.
+`from` accepts the browser's current coordinates or a Warsaw place name for backwards
+compatibility. Coordinate origins must be inside the Warsaw view box. `mode` accepts
+`walking` or `cycling`. The response contains resolved endpoints, route alternatives,
+the selected route ID, green scores, greenery points and counts, warnings for partially
+unavailable inventories, and a calculation timestamp.
 
 ### `GET /api/air`
 

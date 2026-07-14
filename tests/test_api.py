@@ -56,15 +56,39 @@ def test_route_endpoint_preserves_response_contract(tmp_path):
     }
 
     class FakeEcoService:
-        async def build_green_route(self, _request):
+        async def build_green_route(self, request):
+            assert request.from_query.lat == 52.2317
+            assert request.from_query.lon == 21.006
             return expected
 
     with TestClient(make_app(tmp_path)) as client:
         client.app.state.eco = FakeEcoService()
         response = client.post(
             "/api/route",
-            json={"from": "Place A", "to": "Place B", "mode": "walking"},
+            json={
+                "from": {
+                    "lat": 52.2317,
+                    "lon": 21.006,
+                    "label": "Your location",
+                },
+                "to": "Place B",
+                "mode": "walking",
+            },
         )
 
     assert response.status_code == 200
     assert response.json() == expected
+
+
+def test_route_rejects_invalid_current_location_coordinates(tmp_path):
+    with TestClient(make_app(tmp_path)) as client:
+        response = client.post(
+            "/api/route",
+            json={
+                "from": {"lat": 120, "lon": 21.006},
+                "to": "Place B",
+                "mode": "walking",
+            },
+        )
+
+    assert response.status_code == 400

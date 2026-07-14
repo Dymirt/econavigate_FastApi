@@ -13,13 +13,19 @@ from typing import Any, TypeVar
 from .cache import PersistentTTLCache
 from .config import Settings
 from .errors import ApiError
-from .models import RouteRequest
+from .models import CurrentLocation, RouteRequest
 from .scoring import build_route_response
 from .upstream import UpstreamClient
 
 T = TypeVar("T")
 
 WARSAW_VIEWBOX = "20.8517,52.3681,21.2712,52.0978"
+WARSAW_BOUNDS = {
+    "west": 20.8517,
+    "south": 52.0978,
+    "east": 21.2712,
+    "north": 52.3681,
+}
 GREENERY_RESOURCES = {
     "tree": {
         "id": "ed6217dd-c8d0-4f7b-8bed-3b7eb81a95ba",
@@ -182,9 +188,14 @@ class EcoService:
         )
 
     async def build_green_route(self, request: RouteRequest) -> dict[str, Any]:
+        origin_fingerprint = (
+            normalize_text(request.from_query)
+            if isinstance(request.from_query, str)
+            else f"{request.from_query.lat:.5f},{request.from_query.lon:.5f}"
+        )
         fingerprint = "|".join(
             (
-                normalize_text(request.from_query),
+                origin_fingerprint,
                 normalize_text(request.to_query),
                 request.mode,
             )
@@ -198,7 +209,7 @@ class EcoService:
 
     async def _build_green_route(self, request: RouteRequest) -> dict[str, Any]:
         from_place, to_place = await asyncio.gather(
-            self._geocode(request.from_query),
+            self._resolve_origin(request.from_query),
             self._geocode(request.to_query),
         )
         routes = await self._fetch_routes(from_place, to_place, request.mode)
@@ -235,6 +246,24 @@ class EcoService:
             districts=districts,
             warnings=warnings,
         )
+
+    async def _resolve_origin(self, origin: str | CurrentLocation) -> dict[str, Any]:
+        if isinstance(origin, str):
+            return await self._geocode(origin)
+
+        if not (
+            WARSAW_BOUNDS["west"] <= origin.lon <= WARSAW_BOUNDS["east"]
+            and WARSAW_BOUNDS["south"] <= origin.lat <= WARSAW_BOUNDS["north"]
+        ):
+            raise ApiError("Your current location must be inside Warsaw.", 400)
+
+        resolved = await self._reverse_geocode([origin.lon, origin.lat])
+        return {
+            **resolved,
+            "lat": origin.lat,
+            "lon": origin.lon,
+            "label": origin.label,
+        }
 
     async def _geocode(self, query: str) -> dict[str, Any]:
         digest = hashlib.sha256(normalize_text(query).encode()).hexdigest()
