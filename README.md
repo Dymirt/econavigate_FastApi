@@ -61,10 +61,12 @@ Interactive OpenAPI documentation is available at `/docs`.
 ```
 
 `from` accepts the browser's current coordinates or a Warsaw place name for backwards
-compatibility. Coordinate origins must be inside the Warsaw view box. `mode` accepts
-`walking` or `cycling`. The response contains resolved endpoints, route alternatives,
-the selected route ID, green scores, greenery points and counts, warnings for partially
-unavailable inventories, and a calculation timestamp.
+compatibility. Coordinate origins may be outside Warsaw when the routing provider has
+coverage, while destination search remains focused on Warsaw. Green scores use Warsaw's
+inventory and therefore only reflect the part of a route covered by that data. `mode`
+accepts `walking` or `cycling`. The response contains resolved endpoints, route
+alternatives, the selected route ID, green scores, greenery points and counts, warnings
+for partially unavailable inventories, and a calculation timestamp.
 
 ### `GET /api/air`
 

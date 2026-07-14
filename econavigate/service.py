@@ -20,12 +20,6 @@ from .upstream import UpstreamClient
 T = TypeVar("T")
 
 WARSAW_VIEWBOX = "20.8517,52.3681,21.2712,52.0978"
-WARSAW_BOUNDS = {
-    "west": 20.8517,
-    "south": 52.0978,
-    "east": 21.2712,
-    "north": 52.3681,
-}
 GREENERY_RESOURCES = {
     "tree": {
         "id": "ed6217dd-c8d0-4f7b-8bed-3b7eb81a95ba",
@@ -251,13 +245,10 @@ class EcoService:
         if isinstance(origin, str):
             return await self._geocode(origin)
 
-        if not (
-            WARSAW_BOUNDS["west"] <= origin.lon <= WARSAW_BOUNDS["east"]
-            and WARSAW_BOUNDS["south"] <= origin.lat <= WARSAW_BOUNDS["north"]
-        ):
-            raise ApiError("Your current location must be inside Warsaw.", 400)
-
-        resolved = await self._reverse_geocode([origin.lon, origin.lat])
+        try:
+            resolved = await self._reverse_geocode([origin.lon, origin.lat])
+        except ApiError:
+            resolved = {"district": None}
         return {
             **resolved,
             "lat": origin.lat,
