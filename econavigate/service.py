@@ -13,6 +13,7 @@ from typing import Any, TypeVar
 from .cache import PersistentTTLCache
 from .config import Settings
 from .errors import ApiError
+from .green_areas import normalize_green_areas
 from .models import CurrentLocation, RouteRequest
 from .scoring import build_route_response
 from .upstream import UpstreamClient
@@ -37,6 +38,15 @@ GREENERY_RESOURCES = {
         "fields": "_id,x_wgs84,y_wgs84,dzielnica,obwód,osiedle,gat_panujacy,wiek",
     },
 }
+OVERPASS_GREEN_AREAS_QUERY = """[out:json][timeout:60];
+(
+  way["leisure"~"^(park|nature_reserve)$"](52.0978,20.8517,52.3681,21.2712);
+  relation["leisure"~"^(park|nature_reserve)$"](52.0978,20.8517,52.3681,21.2712);
+  way["landuse"~"^(village_green|recreation_ground|greenery)$"](52.0978,20.8517,52.3681,21.2712);
+  relation["landuse"~"^(village_green|recreation_ground|greenery)$"](52.0978,20.8517,52.3681,21.2712);
+);
+out geom;
+"""
 
 DISTRICT_ALIASES = sorted(
     {
@@ -199,7 +209,7 @@ class EcoService:
         )
         digest = hashlib.sha256(fingerprint.encode()).hexdigest()
         return await self.cache.get_or_load(
-            f"v5:route:{digest}",
+            f"v10:route:{digest}",
             self.settings.route_cache_ttl_seconds,
             lambda: self._build_green_route(request),
         )
@@ -209,18 +219,38 @@ class EcoService:
             self._resolve_origin(request.from_query),
             self._geocode(request.to_query),
         )
-        baseline_routes = await self._fetch_routes(from_place, to_place, request.mode)
-        greenery, warnings = await self._fetch_greenery()
+        baseline_result, greenery_result, green_area_result = await asyncio.gather(
+            self._fetch_routes(from_place, to_place, request.mode),
+            self._fetch_greenery(),
+            self._fetch_green_areas(),
+            return_exceptions=True,
+        )
+        if isinstance(baseline_result, BaseException):
+            raise baseline_result
+        if isinstance(greenery_result, BaseException):
+            greenery, warnings = [], ["Complete greenery inventories were unavailable"]
+        else:
+            greenery, warnings = greenery_result
+        if isinstance(green_area_result, BaseException):
+            green_area_data = {"areaCount": 0, "cells": []}
+            warnings.append("Park and green-area polygons were unavailable")
+        else:
+            green_area_data = green_area_result
+
+        baseline_routes = baseline_result
+        green_areas = green_area_data["cells"]
         districts = sorted({str(point["district"]) for point in greenery if point.get("district")})
         inventory_counts = {
             greenery_type: sum(point["type"] == greenery_type for point in greenery)
             for greenery_type in GREENERY_RESOURCES
         }
+        inventory_counts["greenArea"] = green_area_data["areaCount"]
         fastest_route = min(baseline_routes, key=lambda route: route["distance"])
         green_waypoints = await asyncio.to_thread(
             build_green_corridor_waypoints,
             fastest_route,
             greenery,
+            green_areas,
         )
         routes = baseline_routes
         routing_strategy = "ranked-alternatives"
@@ -253,6 +283,7 @@ class EcoService:
             build_route_response,
             routes=routes,
             greenery=greenery,
+            green_areas=green_areas,
             from_place=from_place,
             to_place=to_place,
             mode=request.mode,
@@ -406,24 +437,54 @@ class EcoService:
             )
         return routes
 
+    async def _fetch_green_areas(self) -> dict[str, Any]:
+        async def load() -> dict[str, Any]:
+            last_error: ApiError | None = None
+            for url in self.settings.overpass_url_list:
+                try:
+                    payload = await self.upstream.get_json(
+                        url,
+                        source="OpenStreetMap green-area data",
+                        params={"data": OVERPASS_GREEN_AREAS_QUERY},
+                    )
+                    return await asyncio.to_thread(normalize_green_areas, payload)
+                except (ApiError, ValueError) as error:
+                    last_error = error if isinstance(error, ApiError) else ApiError(str(error), 502)
+            raise last_error or ApiError("No Overpass API URL is configured.", 502)
+
+        return await self.cache.get_or_load(
+            "v1:green-areas:osm",
+            self.settings.greenery_cache_ttl_seconds,
+            load,
+        )
+
     async def _fetch_greenery_resource(self, greenery_type: str) -> list[dict[str, Any]]:
         resource = GREENERY_RESOURCES[greenery_type]
-        key = f"v2:greenery:all:{greenery_type}"
+        key = f"v3:greenery:all:{greenery_type}"
 
         async def load() -> list[dict[str, Any]]:
             normalized_records: list[dict[str, Any]] = []
             offset = 0
             while True:
-                payload = await self.upstream.get_json(
-                    f"{self.settings.warsaw_api_url}/datastore_search/",
-                    source=f"Warsaw {greenery_type} data",
-                    params={
-                        "resource_id": resource["id"],
-                        "fields": resource["fields"],
-                        "limit": str(self.settings.greenery_page_size),
-                        "offset": str(offset),
-                    },
-                )
+                params = {
+                    "resource_id": resource["id"],
+                    "fields": resource["fields"],
+                    "sort": "_id asc",
+                    "limit": str(self.settings.greenery_page_size),
+                    "offset": str(offset),
+                }
+                for attempt in range(2):
+                    try:
+                        payload = await self.upstream.get_json(
+                            f"{self.settings.warsaw_api_url}/datastore_search/",
+                            source=f"Warsaw {greenery_type} data",
+                            params=params,
+                        )
+                        break
+                    except ApiError:
+                        if attempt == 1:
+                            raise
+                        await asyncio.sleep(0.25)
                 result = payload.get("result") if isinstance(payload, dict) else None
                 records = result.get("records") if isinstance(result, dict) else None
                 if not isinstance(records, list):

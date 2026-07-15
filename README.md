@@ -14,10 +14,14 @@ repository's Node/Vercel backend and preserves its existing API contract.
 - Requests pedestrian or bicycle alternatives from Valhalla.
 - Loads current tree, shrub, and forest inventories from Warsaw Open Data.
 - Paginates through every Warsaw tree, shrub, and forest record before optimization.
-- Builds a citywide 120-metre green-density grid from the complete inventory.
+- Loads public-style park and green-area polygons from OpenStreetMap through Overpass.
+- Rasterizes polygons into a compact 60-metre area grid and caches it for seven days.
+- Builds a citywide 120-metre green-density grid from the complete point and area data.
 - Uses A* with a strong empty-area penalty to find a continuous green corridor.
+- Gives parks the strongest area weight so routable paths through parks are preferred.
 - Sends ordered corridor anchors to Valhalla as `through` locations to generate a route.
-- Scores every route using only greenery within 5 metres of its route line.
+- Scores point inventories using only records within 5 metres of the route line.
+- Adds route distance through parks and other mapped green areas to the green score.
 - Returns route-specific greenery points and counts for every alternative.
 - Returns every qualifying record without thinning map points.
 - Selects the best green route after applying a detour penalty.
@@ -40,6 +44,7 @@ Responses are cached in a persistent DiskCache database:
 | Data | Default TTL | Reason |
 | --- | ---: | --- |
 | Tree, shrub, and forest inventories | 7 days | These records change slowly and are expensive to download. |
+| Park and green-area polygons | 7 days | Overpass geometry changes slowly and is compacted into grid cells. |
 | Geocoding and district lookups | 30 days | Addresses rarely change. |
 | Complete route results | 10 minutes | Makes repeated searches immediate while allowing routing updates. |
 | Air quality | 5 minutes | Keeps sensor readings reasonably fresh. |
@@ -74,10 +79,10 @@ coverage, while destination search remains focused on Warsaw. Green scores use W
 inventory and therefore only reflect the part of a route covered by that data. `mode`
 accepts `walking` or `cycling`. The response contains resolved endpoints, route
 alternatives, the selected route ID, green scores, all greenery points within 5 metres
-and their counts, complete citywide `inventoryCounts`, warnings for partially unavailable
-inventories, and a calculation timestamp. `routingStrategy` reports whether the citywide
-green corridor produced an accepted route, and `greenWaypoints` contains its ordered
-intermediate anchors.
+and their counts, per-route `greenAreaCoverage`, complete citywide `inventoryCounts`,
+warnings for partially unavailable inventories, and a calculation timestamp.
+`routingStrategy` reports whether the citywide green corridor produced an accepted
+route, and `greenWaypoints` contains its ordered intermediate anchors and park names.
 
 ### `GET /api/air`
 
@@ -163,6 +168,8 @@ see `econavigate/config.py` for the complete list.
 ## Data and routing sources
 
 - [Warsaw Open Data API](https://api.um.warszawa.pl/) — tree, shrub, forest, and air-quality data.
+- [OpenStreetMap Overpass API](https://wiki.openstreetmap.org/wiki/Overpass_API) — park,
+  nature reserve, recreation ground, village green, and urban-greenery polygons.
 - [OpenStreetMap Nominatim](https://nominatim.org/) — address and district lookup.
 - [Valhalla](https://valhalla.github.io/valhalla/) — walking and cycling route alternatives.
 - [OpenStreetMap](https://www.openstreetmap.org/copyright) — map and routing source data.

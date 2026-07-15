@@ -4,6 +4,8 @@ import heapq
 import math
 from typing import Any
 
+from .green_areas import area_cell_center
+
 Coordinate = list[float]
 GridKey = tuple[int, int]
 Point = dict[str, Any]
@@ -55,7 +57,19 @@ def _inside_warsaw(coordinate: Coordinate) -> bool:
     )
 
 
-def _build_green_grid(points: list[Point]) -> dict[GridKey, dict[str, Any]]:
+def _empty_grid_cell() -> dict[str, Any]:
+    return {
+        "weightedCount": 0.0,
+        "areaBonus": 0.0,
+        "greenArea": None,
+        "counts": {"tree": 0, "shrub": 0, "forest": 0},
+        "representative": None,
+    }
+
+
+def _build_green_grid(
+    points: list[Point], green_areas: list[dict[str, Any]]
+) -> dict[GridKey, dict[str, Any]]:
     grid: dict[GridKey, dict[str, Any]] = {}
     for point in points:
         greenery_type = point.get("type")
@@ -65,19 +79,23 @@ def _build_green_grid(points: list[Point]) -> dict[GridKey, dict[str, Any]]:
         if not _inside_warsaw(coordinate):
             continue
         key = _grid_key(coordinate)
-        cell = grid.setdefault(
-            key,
-            {
-                "weightedCount": 0.0,
-                "counts": {"tree": 0, "shrub": 0, "forest": 0},
-                "representative": point,
-            },
-        )
+        cell = grid.setdefault(key, _empty_grid_cell())
         cell["weightedCount"] += GREENERY_WEIGHTS[greenery_type]
         cell["counts"][greenery_type] += 1
-        current_type = cell["representative"]["type"]
-        if REPRESENTATIVE_PRIORITY[greenery_type] > REPRESENTATIVE_PRIORITY[current_type]:
+        current = cell["representative"]
+        if current is None or (
+            REPRESENTATIVE_PRIORITY[greenery_type] > REPRESENTATIVE_PRIORITY[current["type"]]
+        ):
             cell["representative"] = point
+
+    for area in green_areas:
+        coordinate = area_cell_center((int(area["x"]), int(area["y"])))
+        key = _grid_key(coordinate)
+        cell = grid.setdefault(key, _empty_grid_cell())
+        weight = float(area["weight"])
+        if weight >= cell["areaBonus"]:
+            cell["areaBonus"] = weight
+            cell["greenArea"] = area
     return grid
 
 
@@ -94,7 +112,7 @@ def _green_level(grid: dict[GridKey, dict[str, Any]], key: GridKey) -> float:
                 influence = 0.4
             else:
                 influence = 0.2
-            weighted_score += cell["weightedCount"] * influence
+            weighted_score += (cell["weightedCount"] + cell["areaBonus"]) * influence
     return 1.0 - math.exp(-weighted_score / GREEN_SATURATION_SCORE)
 
 
@@ -200,7 +218,7 @@ def _corridor_waypoints(
                         nearby_green_cells,
                         key=lambda key: (
                             _green_level(grid, key),
-                            grid[key]["weightedCount"],
+                            grid[key]["weightedCount"] + grid[key]["areaBonus"],
                         ),
                     ),
                 )
@@ -229,7 +247,7 @@ def _corridor_waypoints(
                 bin_candidates,
                 key=lambda candidate: (
                     _green_level(grid, candidate[1]),
-                    grid[candidate[1]]["weightedCount"],
+                    grid[candidate[1]]["weightedCount"] + grid[candidate[1]]["areaBonus"],
                 ),
             )
         )
@@ -238,7 +256,11 @@ def _corridor_waypoints(
     waypoints = []
     seen_coordinates = set()
     for _, key in selected:
-        point = grid[key]["representative"]
+        cell = grid[key]
+        point = cell["representative"]
+        if point is None:
+            longitude, latitude = _cell_center(key)
+            point = {"lat": latitude, "lon": longitude}
         coordinate_key = (round(point["lat"], 6), round(point["lon"], 6))
         if coordinate_key in seen_coordinates:
             continue
@@ -253,6 +275,8 @@ def _corridor_waypoints(
                 "shrubCount": counts["shrub"],
                 "forestCount": counts["forest"],
                 "greenLevel": round(_green_level(grid, key) * 100),
+                "greenArea": cell["greenArea"]["category"] if cell["greenArea"] else None,
+                "greenAreaName": cell["greenArea"]["name"] if cell["greenArea"] else None,
             }
         )
     return waypoints
@@ -261,19 +285,21 @@ def _corridor_waypoints(
 def build_green_corridor_waypoints(
     baseline_route: Route,
     greenery: list[Point],
+    green_areas: list[dict[str, Any]] | None = None,
     *,
     max_waypoints: int = MAX_GREEN_WAYPOINTS,
 ) -> list[dict[str, Any]]:
     """Build a citywide low-cost path through green cells, then return route anchors."""
 
-    if max_waypoints < 1 or not greenery:
+    green_areas = green_areas or []
+    if max_waypoints < 1 or (not greenery and not green_areas):
         return []
     coordinates = baseline_route["geometry"]["coordinates"]
     warsaw_coordinates = [coordinate for coordinate in coordinates if _inside_warsaw(coordinate)]
     if len(warsaw_coordinates) < 2:
         return []
 
-    grid = _build_green_grid(greenery)
+    grid = _build_green_grid(greenery, green_areas)
     if not grid:
         return []
     start = _grid_key(warsaw_coordinates[0])

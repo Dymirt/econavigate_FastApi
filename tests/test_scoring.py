@@ -1,3 +1,4 @@
+from econavigate.green_areas import PARK_WEIGHT, area_grid_key
 from econavigate.scoring import build_route_response
 
 
@@ -107,3 +108,67 @@ def test_returns_every_tree_within_five_metres_and_excludes_farther_trees():
     assert len(displayed_ids) == 600
     assert response["ecoCounts"]["tree"] == 600
     assert "tree-too-far" not in displayed_ids
+
+
+def test_route_through_a_park_can_beat_a_direct_route_with_trees():
+    routes = [
+        {
+            "id": "route-1",
+            "distance": 1_000.0,
+            "duration": 800.0,
+            "summary": "Direct route",
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [[21.0, 52.2], [21.01, 52.2]],
+            },
+        },
+        {
+            "id": "route-2",
+            "distance": 1_100.0,
+            "duration": 900.0,
+            "summary": "Park route",
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [[21.0, 52.201], [21.01, 52.201]],
+            },
+        },
+    ]
+    park_cells = {}
+    for index in range(21):
+        key = area_grid_key([21.0 + index * 0.0005, 52.201])
+        park_cells[key] = {
+            "x": key[0],
+            "y": key[1],
+            "category": "park",
+            "weight": PARK_WEIGHT,
+            "name": "Test Park",
+        }
+    direct_route_trees = [
+        {
+            "id": f"direct-tree-{index}",
+            "type": "tree",
+            "lon": 21.0005 + index * 0.0006,
+            "lat": 52.2,
+            "district": "Śródmieście",
+            "name": "Tree",
+            "detail": "good",
+        }
+        for index in range(15)
+    ]
+
+    response = build_route_response(
+        routes=routes,
+        greenery=direct_route_trees,
+        green_areas=list(park_cells.values()),
+        from_place={"lat": 52.2, "lon": 21.0, "label": "A", "district": None},
+        to_place={"lat": 52.2, "lon": 21.01, "label": "B", "district": None},
+        mode="walking",
+        districts=[],
+        warnings=[],
+    )
+
+    assert response["selectedRouteId"] == "route-2"
+    assert response["routes"][0]["ecoCounts"]["tree"] == 15
+    assert response["routes"][1]["greenScore"] > response["routes"][0]["greenScore"]
+    assert response["routes"][1]["greenAreaCoverage"]["parkMeters"] > 500
+    assert response["routes"][1]["greenAreaCoverage"]["parks"] == ["Test Park"]

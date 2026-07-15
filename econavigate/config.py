@@ -20,6 +20,9 @@ class Settings(BaseSettings):
 
     warsaw_api_token: SecretStr | None = None
     warsaw_api_url: str = "https://api.um.warszawa.pl/api/action"
+    overpass_api_urls: str = (
+        "https://lz4.overpass-api.de/api/interpreter,https://z.overpass-api.de/api/interpreter"
+    )
     nominatim_api_url: str = "https://nominatim.openstreetmap.org"
     valhalla_api_url: str = "https://valhalla1.openstreetmap.de/route"
     project_user_agent: str = (
@@ -52,6 +55,10 @@ class Settings(BaseSettings):
             return None
         value = self.warsaw_api_token.get_secret_value().strip()
         return value or None
+
+    @property
+    def overpass_url_list(self) -> list[str]:
+        return [url.strip() for url in self.overpass_api_urls.split(",") if url.strip()]
 
 
 @lru_cache

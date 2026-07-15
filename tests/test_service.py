@@ -84,6 +84,67 @@ async def test_complete_greenery_resource_is_loaded_with_pagination(tmp_path):
     assert first_params["offset"] == "0"
     assert second_params["offset"] == "2"
     assert "filters" not in first_params
+    assert first_params["sort"] == "_id asc"
+    await service.cache.close()
+
+
+@pytest.mark.asyncio
+async def test_greenery_page_is_retried_after_a_transient_failure(tmp_path):
+    service = make_service(tmp_path)
+    service.upstream.get_json.side_effect = [
+        ApiError("temporary failure", 502),
+        {
+            "result": {
+                "records": [
+                    {
+                        "_id": 1,
+                        "x_wgs84": 21.0,
+                        "y_wgs84": 52.2,
+                        "gatunek": "oak",
+                    }
+                ],
+                "total": 1,
+            }
+        },
+    ]
+
+    points = await service._fetch_greenery_resource("tree")
+
+    assert len(points) == 1
+    assert service.upstream.get_json.await_count == 2
+    await service.cache.close()
+
+
+@pytest.mark.asyncio
+async def test_green_area_polygons_are_loaded_from_overpass_and_cached(tmp_path):
+    service = make_service(tmp_path)
+    service.upstream.get_json.return_value = {
+        "elements": [
+            {
+                "type": "way",
+                "id": 9,
+                "tags": {"leisure": "park", "name": "Test Park"},
+                "geometry": [
+                    {"lon": 20.998, "lat": 52.198},
+                    {"lon": 21.002, "lat": 52.198},
+                    {"lon": 21.002, "lat": 52.202},
+                    {"lon": 20.998, "lat": 52.202},
+                    {"lon": 20.998, "lat": 52.198},
+                ],
+            }
+        ]
+    }
+
+    first = await service._fetch_green_areas()
+    second = await service._fetch_green_areas()
+
+    assert first["areaCount"] == 1
+    assert first["cells"]
+    assert second == first
+    assert service.upstream.get_json.await_count == 1
+    params = service.upstream.get_json.await_args.kwargs["params"]
+    assert '"leisure"~"^(park|nature_reserve)$"' in params["data"]
+    assert "out geom" in params["data"]
     await service.cache.close()
 
 

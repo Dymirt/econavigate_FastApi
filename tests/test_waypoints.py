@@ -1,5 +1,6 @@
 import pytest
 
+from econavigate.green_areas import PARK_WEIGHT, area_grid_key
 from econavigate.waypoints import build_green_corridor_waypoints
 
 
@@ -73,3 +74,31 @@ def test_citywide_optimizer_returns_no_waypoints_without_greenery():
     }
 
     assert build_green_corridor_waypoints(route, []) == []
+
+
+def test_citywide_optimizer_can_build_a_corridor_from_park_area_cells():
+    route = {
+        "id": "route-1",
+        "distance": 4_100.0,
+        "geometry": {
+            "type": "LineString",
+            "coordinates": [[21.0, 52.2], [21.06, 52.2]],
+        },
+    }
+    park_cells = {}
+    for index in range(61):
+        key = area_grid_key([21.0 + index * 0.001, 52.205])
+        park_cells[key] = {
+            "x": key[0],
+            "y": key[1],
+            "category": "park",
+            "weight": PARK_WEIGHT,
+            "name": "Linear Park",
+        }
+
+    waypoints = build_green_corridor_waypoints(route, [], list(park_cells.values()))
+
+    assert len(waypoints) >= 3
+    assert all(waypoint["greenArea"] == "park" for waypoint in waypoints)
+    assert all(waypoint["greenAreaName"] == "Linear Park" for waypoint in waypoints)
+    assert all(waypoint["lat"] > 52.203 for waypoint in waypoints)
