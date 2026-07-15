@@ -19,7 +19,12 @@ repository's Node/Vercel backend and preserves its existing API contract.
 - Builds a citywide 120-metre green-density grid from the complete point and area data.
 - Uses A* with a strong empty-area penalty to find a continuous green corridor.
 - Gives parks the strongest area weight so routable paths through parks are preferred.
-- Sends ordered corridor anchors to Valhalla as `through` locations to generate a route.
+- Uses ordered corridor anchors only to discover real routable green path segments.
+- Sends those matched segments back to Valhalla as custom edge costs: park paths are
+  cheapest, tree-lined segments are discounted, and barren shortest-route segments
+  are penalized.
+- Builds the final route without forced intermediate anchors, preventing anchor U-turns.
+- Rejects candidates that retrace more than 2% of their road edges.
 - Scores point inventories using only records within 5 metres of the route line.
 - Adds route distance through parks and other mapped green areas to the green score.
 - Returns route-specific greenery points and counts for every alternative.
@@ -81,8 +86,9 @@ accepts `walking` or `cycling`. The response contains resolved endpoints, route
 alternatives, the selected route ID, green scores, all greenery points within 5 metres
 and their counts, per-route `greenAreaCoverage`, complete citywide `inventoryCounts`,
 warnings for partially unavailable inventories, and a calculation timestamp.
-`routingStrategy` reports whether the citywide green corridor produced an accepted
-route, and `greenWaypoints` contains its ordered intermediate anchors and park names.
+`routingStrategy` reports whether custom green edge costs produced an accepted final
+route, and `greenWaypoints` contains the discovery corridor's ordered anchors and park
+names. Those anchors are not forced stops in the final route.
 
 ### `GET /api/air`
 

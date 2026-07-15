@@ -191,3 +191,52 @@ async def test_green_corridor_waypoints_are_sent_as_ordered_through_locations(tm
     assert routes[0]["routeKind"] == "green-corridor"
     assert routes[0]["greenWaypoints"] == waypoints
     await service.cache.close()
+
+
+@pytest.mark.asyncio
+async def test_green_cost_factors_are_sent_without_forcing_waypoints(tmp_path):
+    service = make_service(tmp_path)
+    service.upstream.get_json.return_value = {
+        "code": "Ok",
+        "routes": [
+            {
+                "distance": 1_050,
+                "duration": 850,
+                "legs": [{"summary": "Park path"}],
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [[21.0, 52.2], [21.01, 52.2]],
+                },
+            }
+        ],
+    }
+    waypoints = [{"lat": 52.201, "lon": 21.005, "greenArea": "park"}]
+    factors = [
+        {
+            "type": "Feature",
+            "properties": {"factor": 0.12},
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [[21.002, 52.2], [21.008, 52.2]],
+            },
+        }
+    ]
+
+    routes = await service._fetch_routes(
+        {"lat": 52.2, "lon": 21.0},
+        {"lat": 52.2, "lon": 21.01},
+        "walking",
+        alternates=0,
+        route_kind="green-corridor",
+        linear_cost_factors=factors,
+        green_waypoints=waypoints,
+    )
+
+    request_json = json.loads(service.upstream.get_json.await_args.kwargs["params"]["json"])
+    assert request_json["locations"] == [
+        {"lat": 52.2, "lon": 21.0},
+        {"lat": 52.2, "lon": 21.01},
+    ]
+    assert request_json["linear_cost_factors"] == factors
+    assert routes[0]["greenWaypoints"] == waypoints
+    await service.cache.close()

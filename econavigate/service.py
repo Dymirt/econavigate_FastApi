@@ -7,11 +7,13 @@ import math
 import time
 import unicodedata
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any, TypeVar
 
 from .cache import PersistentTTLCache
 from .config import Settings
+from .cost_factors import build_linear_cost_factors, route_retrace_ratio
 from .errors import ApiError
 from .green_areas import normalize_green_areas
 from .models import CurrentLocation, RouteRequest
@@ -22,6 +24,7 @@ from .waypoints import build_green_corridor_waypoints
 T = TypeVar("T")
 MAX_GREEN_ROUTE_DETOUR_RATIO = 1.35
 MAX_GREEN_ROUTE_EXTRA_METERS = 5_000.0
+MAX_ROUTE_RETRACE_RATIO = 0.02
 
 WARSAW_VIEWBOX = "20.8517,52.3681,21.2712,52.0978"
 GREENERY_RESOURCES = {
@@ -209,7 +212,7 @@ class EcoService:
         )
         digest = hashlib.sha256(fingerprint.encode()).hexdigest()
         return await self.cache.get_or_load(
-            f"v10:route:{digest}",
+            f"v11:route:{digest}",
             self.settings.route_cache_ttl_seconds,
             lambda: self._build_green_route(request),
         )
@@ -256,7 +259,7 @@ class EcoService:
         routing_strategy = "ranked-alternatives"
         if green_waypoints:
             try:
-                generated_route = (
+                probe_route = (
                     await self._fetch_routes(
                         from_place,
                         to_place,
@@ -269,13 +272,38 @@ class EcoService:
             except ApiError:
                 green_waypoints = []
             else:
+                linear_cost_factors = await asyncio.to_thread(
+                    build_linear_cost_factors,
+                    [probe_route, *baseline_routes],
+                    greenery,
+                    green_areas,
+                    penalized_routes=baseline_routes,
+                )
+                generated_route = None
+                if linear_cost_factors:
+                    with suppress(ApiError):
+                        generated_route = (
+                            await self._fetch_routes(
+                                from_place,
+                                to_place,
+                                request.mode,
+                                alternates=0,
+                                route_kind="green-corridor",
+                                linear_cost_factors=linear_cost_factors,
+                                green_waypoints=green_waypoints,
+                            )
+                        )[0]
                 maximum_green_route_distance = min(
                     fastest_route["distance"] * MAX_GREEN_ROUTE_DETOUR_RATIO,
                     fastest_route["distance"] + MAX_GREEN_ROUTE_EXTRA_METERS,
                 )
-                if generated_route["distance"] <= maximum_green_route_distance:
+                if (
+                    generated_route is not None
+                    and generated_route["distance"] <= maximum_green_route_distance
+                    and route_retrace_ratio(generated_route) <= MAX_ROUTE_RETRACE_RATIO
+                ):
                     routes = [generated_route, *baseline_routes[:2]]
-                    routing_strategy = "citywide-green-corridor"
+                    routing_strategy = "green-edge-costs"
                 else:
                     green_waypoints = []
 
@@ -374,6 +402,8 @@ class EcoService:
         waypoints: list[dict[str, Any]] | None = None,
         alternates: int = 2,
         route_kind: str = "alternative",
+        linear_cost_factors: list[dict[str, Any]] | None = None,
+        green_waypoints: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         costing = "bicycle" if mode == "cycling" else "pedestrian"
         locations = [{"lat": from_place["lat"], "lon": from_place["lon"]}]
@@ -396,6 +426,8 @@ class EcoService:
         }
         if alternates > 0:
             request["alternates"] = alternates
+        if linear_cost_factors:
+            request["linear_cost_factors"] = linear_cost_factors
         if costing == "bicycle":
             request["costing_options"] = {"bicycle": {"bicycle_type": "city", "use_roads": 0.2}}
 
@@ -432,7 +464,9 @@ class EcoService:
                     ),
                     "geometry": route["geometry"],
                     "routeKind": route_kind,
-                    "greenWaypoints": waypoints or [],
+                    "greenWaypoints": (
+                        green_waypoints if green_waypoints is not None else (waypoints or [])
+                    ),
                 }
             )
         return routes
