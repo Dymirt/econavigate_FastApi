@@ -22,9 +22,9 @@ SAMPLE_SPACING_METERS = 20.0
 POINT_CORRIDOR_METERS = 5.0
 POINT_GRID_METERS = 25.0
 MIN_FACTOR_LINE_METERS = 12.0
-MAX_LINEAR_FACTORS = 32
-MAX_PREFERRED_FACTORS = MAX_LINEAR_FACTORS // 2
-ROAD_PENALTY_FACTOR = 3.5
+MAX_LINEAR_FACTORS = 96
+MAX_PREFERRED_FACTORS = 32
+ROAD_PENALTY_FACTOR = 50.0
 
 
 def _to_meters(coordinate: Coordinate) -> tuple[float, float]:
@@ -181,9 +181,9 @@ def build_linear_cost_factors(
                 current_coordinates.append(end)
         flush()
 
-    # Public Valhalla deployments commonly clamp discounts below one. Penalizing the
-    # non-green pieces of the ordinary shortest alternatives gives the green probe a
-    # meaningful advantage there while discounts remain useful on permissive servers.
+    # Penalize every known non-green escape route heavily. The service calls this
+    # repeatedly with newly discovered alternatives, while discounts remain useful
+    # on Valhalla deployments that allow factors below one.
     for route in penalized_routes or []:
         current_coordinates: list[Coordinate] = []
 

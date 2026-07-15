@@ -35,7 +35,7 @@ def test_park_segments_receive_stronger_discount_than_tree_segments():
     factor_values = {feature["properties"]["factor"] for feature in factors}
     assert 0.12 in factor_values
     assert 0.34 in factor_values
-    assert 3.5 in factor_values
+    assert 50.0 in factor_values
     assert all(feature["geometry"]["type"] == "LineString" for feature in factors)
 
 

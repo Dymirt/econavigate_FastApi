@@ -5,7 +5,7 @@ import pytest
 from econavigate.cache import PersistentTTLCache
 from econavigate.config import Settings
 from econavigate.errors import ApiError
-from econavigate.models import CurrentLocation
+from econavigate.models import CurrentLocation, RouteRequest
 from econavigate.service import EcoService
 
 
@@ -238,4 +238,75 @@ async def test_green_cost_factors_are_sent_without_forcing_waypoints(tmp_path):
     ]
     assert request_json["linear_cost_factors"] == factors
     assert routes[0]["greenWaypoints"] == waypoints
+    await service.cache.close()
+
+
+@pytest.mark.asyncio
+async def test_green_route_retries_and_penalizes_each_discovered_route(tmp_path, monkeypatch):
+    service = make_service(tmp_path)
+    place_from = {"lat": 52.2, "lon": 21.0, "label": "A", "district": None}
+    place_to = {"lat": 52.2, "lon": 21.01, "label": "B", "district": None}
+    baseline = {
+        "id": "route-1",
+        "distance": 1_000,
+        "duration": 700,
+        "summary": "Baseline",
+        "routeKind": "alternative",
+        "greenWaypoints": [],
+        "geometry": {"type": "LineString", "coordinates": [[21.0, 52.2], [21.01, 52.2]]},
+    }
+    probe = {**baseline, "id": "green-corridor", "routeKind": "green-corridor"}
+    generated_count = 0
+
+    async def fetch_routes(*_args, **kwargs):
+        nonlocal generated_count
+        if kwargs.get("waypoints"):
+            return [probe]
+        if kwargs.get("linear_cost_factors"):
+            generated_count += 1
+            latitude = 52.2 + generated_count * 0.0001
+            return [
+                {
+                    **probe,
+                    "distance": 1_000 + generated_count * 10,
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[21.0, 52.2], [21.005, latitude], [21.01, 52.2]],
+                    },
+                }
+            ]
+        return [baseline]
+
+    service._resolve_origin = AsyncMock(return_value=place_from)
+    service._geocode = AsyncMock(return_value=place_to)
+    service._fetch_routes = AsyncMock(side_effect=fetch_routes)
+    service._fetch_greenery = AsyncMock(return_value=([], []))
+    service._fetch_green_areas = AsyncMock(return_value={"areaCount": 0, "cells": []})
+    monkeypatch.setattr(
+        "econavigate.service.build_green_corridor_waypoints",
+        lambda *_args: [{"lat": 52.201, "lon": 21.005}],
+    )
+    penalized_route_counts = []
+
+    def factors(*_args, penalized_routes):
+        penalized_route_counts.append(len(penalized_routes))
+        return [{"shape": "matched", "factor": 50.0}]
+
+    monkeypatch.setattr("econavigate.service.build_linear_cost_factors", factors)
+    monkeypatch.setattr("econavigate.service.route_retrace_ratio", lambda _route: 0.0)
+
+    result = await service._build_green_route(
+        RouteRequest.model_validate(
+            {"from": {"lat": 52.2, "lon": 21.0}, "to": "Test destination", "mode": "walking"}
+        )
+    )
+
+    assert generated_count == 3
+    assert penalized_route_counts == [1, 2, 3]
+    assert result["routingStrategy"] == "green-edge-costs"
+    assert [route["id"] for route in result["routes"]] == [
+        "green-corridor-1",
+        "green-corridor-2",
+        "green-corridor-3",
+    ]
     await service.cache.close()

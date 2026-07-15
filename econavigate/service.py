@@ -24,6 +24,7 @@ T = TypeVar("T")
 MAX_GREEN_ROUTE_DETOUR_RATIO = 1.35
 MAX_GREEN_ROUTE_EXTRA_METERS = 5_000.0
 MAX_ROUTE_RETRACE_RATIO = 0.02
+MAX_GREEN_ROUTING_PASSES = 3
 
 WARSAW_VIEWBOX = "20.8517,52.3681,21.2712,52.0978"
 GREENERY_RESOURCES = {
@@ -211,7 +212,7 @@ class EcoService:
         )
         digest = hashlib.sha256(fingerprint.encode()).hexdigest()
         return await self.cache.get_or_load(
-            f"v11:route:{digest}",
+            f"v12:route:{digest}",
             self.settings.route_cache_ttl_seconds,
             lambda: self._build_green_route(request),
         )
@@ -271,15 +272,24 @@ class EcoService:
             except ApiError:
                 green_waypoints = []
             else:
-                linear_cost_factors = await asyncio.to_thread(
-                    build_linear_cost_factors,
-                    [probe_route, *baseline_routes],
-                    greenery,
-                    green_areas,
-                    penalized_routes=baseline_routes,
+                maximum_green_route_distance = min(
+                    fastest_route["distance"] * MAX_GREEN_ROUTE_DETOUR_RATIO,
+                    fastest_route["distance"] + MAX_GREEN_ROUTE_EXTRA_METERS,
                 )
-                generated_route = None
-                if linear_cost_factors:
+                discovered_routes: list[dict[str, Any]] = []
+                accepted_routes: list[dict[str, Any]] = []
+                seen_shapes: set[tuple[tuple[float, float], ...]] = set()
+                for pass_index in range(MAX_GREEN_ROUTING_PASSES):
+                    linear_cost_factors = await asyncio.to_thread(
+                        build_linear_cost_factors,
+                        [probe_route, *baseline_routes, *discovered_routes],
+                        greenery,
+                        green_areas,
+                        penalized_routes=[*baseline_routes, *discovered_routes],
+                    )
+                    if not linear_cost_factors:
+                        break
+                    generated_route = None
                     with suppress(ApiError):
                         generated_route = (
                             await self._fetch_routes(
@@ -292,16 +302,26 @@ class EcoService:
                                 green_waypoints=green_waypoints,
                             )
                         )[0]
-                maximum_green_route_distance = min(
-                    fastest_route["distance"] * MAX_GREEN_ROUTE_DETOUR_RATIO,
-                    fastest_route["distance"] + MAX_GREEN_ROUTE_EXTRA_METERS,
-                )
-                if (
-                    generated_route is not None
-                    and generated_route["distance"] <= maximum_green_route_distance
-                    and route_retrace_ratio(generated_route) <= MAX_ROUTE_RETRACE_RATIO
-                ):
-                    routes = [generated_route, *baseline_routes[:2]]
+                    if generated_route is None:
+                        break
+                    shape = tuple(
+                        (round(point[0], 6), round(point[1], 6))
+                        for point in generated_route["geometry"]["coordinates"]
+                    )
+                    if shape in seen_shapes:
+                        break
+                    seen_shapes.add(shape)
+                    discovered_routes.append(generated_route)
+                    if (
+                        generated_route["distance"] <= maximum_green_route_distance
+                        and route_retrace_ratio(generated_route) <= MAX_ROUTE_RETRACE_RATIO
+                    ):
+                        generated_route["id"] = f"green-corridor-{pass_index + 1}"
+                        accepted_routes.append(generated_route)
+
+                if accepted_routes:
+                    routes = accepted_routes[-3:]
+                    routes.extend(baseline_routes[: max(0, 3 - len(routes))])
                     routing_strategy = "green-edge-costs"
                 else:
                     green_waypoints = []

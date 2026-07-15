@@ -23,6 +23,8 @@ repository's Node/Vercel backend and preserves its existing API contract.
 - Sends those matched segments back to Valhalla as custom edge costs: park paths are
   cheapest, tree-lined segments are discounted, and barren shortest-route segments
   are penalized.
+- Repeats the route search up to three times; each newly discovered non-green road
+  segment receives a 50x path-cost penalty on the next pass.
 - Builds the final route without forced intermediate anchors, preventing anchor U-turns.
 - Rejects candidates that retrace more than 2% of their road edges.
 - Scores point inventories using only records within 5 metres of the route line.
