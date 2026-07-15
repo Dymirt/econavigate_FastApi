@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import math
 import time
 import unicodedata
@@ -431,10 +430,10 @@ class EcoService:
         if costing == "bicycle":
             request["costing_options"] = {"bicycle": {"bicycle_type": "city", "use_roads": 0.2}}
 
-        payload = await self.upstream.get_json(
+        payload = await self.upstream.post_json(
             self.settings.valhalla_api_url,
             source="Route service",
-            params={"json": json.dumps(request, separators=(",", ":"))},
+            json=request,
         )
         route_records = payload.get("routes") if isinstance(payload, dict) else None
         if (

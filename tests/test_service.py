@@ -1,4 +1,3 @@
-import json
 from unittest.mock import AsyncMock
 
 import pytest
@@ -151,7 +150,7 @@ async def test_green_area_polygons_are_loaded_from_overpass_and_cached(tmp_path)
 @pytest.mark.asyncio
 async def test_green_corridor_waypoints_are_sent_as_ordered_through_locations(tmp_path):
     service = make_service(tmp_path)
-    service.upstream.get_json.return_value = {
+    service.upstream.post_json.return_value = {
         "code": "Ok",
         "routes": [
             {
@@ -179,7 +178,7 @@ async def test_green_corridor_waypoints_are_sent_as_ordered_through_locations(tm
         route_kind="green-corridor",
     )
 
-    request_json = json.loads(service.upstream.get_json.await_args.kwargs["params"]["json"])
+    request_json = service.upstream.post_json.await_args.kwargs["json"]
     assert "alternates" not in request_json
     assert request_json["locations"] == [
         {"lat": 52.2, "lon": 21.0},
@@ -196,7 +195,7 @@ async def test_green_corridor_waypoints_are_sent_as_ordered_through_locations(tm
 @pytest.mark.asyncio
 async def test_green_cost_factors_are_sent_without_forcing_waypoints(tmp_path):
     service = make_service(tmp_path)
-    service.upstream.get_json.return_value = {
+    service.upstream.post_json.return_value = {
         "code": "Ok",
         "routes": [
             {
@@ -232,7 +231,7 @@ async def test_green_cost_factors_are_sent_without_forcing_waypoints(tmp_path):
         green_waypoints=waypoints,
     )
 
-    request_json = json.loads(service.upstream.get_json.await_args.kwargs["params"]["json"])
+    request_json = service.upstream.post_json.await_args.kwargs["json"]
     assert request_json["locations"] == [
         {"lat": 52.2, "lon": 21.0},
         {"lat": 52.2, "lon": 21.01},
